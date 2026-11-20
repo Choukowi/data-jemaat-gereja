@@ -1,0 +1,21 @@
+# Blueprint Render untuk aplikasi Data Jemaat Gereja.
+# Versi ini dikonfigurasi untuk paket GRATIS (uji coba):
+# - plan: free  -> aplikasi TIDUR setelah 15 menit tidak diakses
+#                 dan TIDAK ada disk persisten: semua data di
+#                 data/jemaat.db DAN foto di data/uploads TERHAPUS
+#                 setiap aplikasi tidur, restart, atau deploy ulang.
+#                 Hanya untuk tes!
+# Untuk pemakaian resmi, ubah menjadi berbayar seperti panduan di
+# README.md (plan: starter + disk persisten + JEMAAT_DB + JEMAAT_UPLOADS).
+services:
+  - type: web
+    name: data-jemaat
+    env: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 app.py
+    healthCheckPath: /login
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3

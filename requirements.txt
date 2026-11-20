@@ -1,0 +1,4 @@
+# Aplikasi ini TIDAK memakai paket eksternal apa pun.
+# Backend murni Python 3 standard library (http.server + sqlite3).
+# Berkas ini sengaja hanya berisi komentar agar langkah build di
+# hosting (pip install -r requirements.txt) tetap berjalan.

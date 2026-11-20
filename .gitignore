@@ -1,0 +1,3 @@
+# Folder data berisi database SQLite dan foto unggahan — TIDAK ikut ke Git.
+data/
+__pycache__/
