@@ -28,6 +28,9 @@ li { margin: 8px 0; }
 code { background: #eef; padding: 1px 5px; border-radius: 4px; }
 /* Kartu keluarga publik */
 .kartu-keluarga h3 { margin-top: 0; }
+.cari-lagi { margin: 14px 0; }
+.cari-lagi a { display: inline-block; background: #5b3a8e; color: #fff; text-decoration: none;
+  padding: 10px 16px; border-radius: 8px; font-size: 1rem; }
 .foto-nikah { display: block; width: 100%; max-width: 520px; border-radius: 12px; margin: 10px 0; }
 .foto-anak { width: 64px; height: 64px; object-fit: cover; border-radius: 10px;
   vertical-align: middle; margin: 0 6px; }
