@@ -1,0 +1,45 @@
+* { box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f7f5ef; color: #232323; }
+header { background: #5b3a8e; color: #fff; padding: 12px 16px; }
+header h1 { font-size: 1.2rem; margin: 0 0 6px; }
+header nav { display: flex; flex-wrap: wrap; gap: 10px; }
+header nav a { color: #e7dcff; text-decoration: none; font-size: .92rem; }
+.userbar { font-size: .85rem; opacity: .9; margin-bottom: 6px; }
+main { padding: 16px; max-width: 860px; margin: 0 auto; }
+footer { padding: 12px 16px; text-align: center; color: #667; }
+label { display: block; margin: 10px 0; font-size: .95rem; }
+label.cek input { display: inline-block; width: auto; margin-right: 6px; }
+input, select { display: block; width: 100%; padding: 10px; margin-top: 4px; font-size: 1rem;
+  border: 1px solid #c4bcd4; border-radius: 8px; background: #fff; }
+button { background: #5b3a8e; color: #fff; border: 0; padding: 10px 16px; border-radius: 8px;
+  font-size: 1rem; cursor: pointer; margin: 6px 4px 6px 0; }
+button.danger { background: #b3261e; }
+form.inline { display: inline; }
+form.inline button { padding: 6px 10px; font-size: .9rem; }
+.flash { background: #e3f2e3; border: 1px solid #7cb87c; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }
+.flash.warn { background: #fdf3e3; border-color: #d9a441; }
+.panel { background: #fff; border: 1px solid #e2ddcc; border-radius: 12px; padding: 14px; margin: 14px 0; }
+.grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.card { background: #fff; border: 1px solid #e2ddcc; border-radius: 12px; padding: 14px; min-width: 110px;
+  display: flex; flex-direction: column; gap: 2px; }
+.card b { font-size: 1.5rem; }
+ul { padding-left: 18px; }
+li { margin: 8px 0; }
+code { background: #eef; padding: 1px 5px; border-radius: 4px; }
+/* Kartu keluarga publik */
+.kartu-keluarga h3 { margin-top: 0; }
+.foto-nikah { display: block; width: 100%; max-width: 520px; border-radius: 12px; margin: 10px 0; }
+.foto-anak { width: 64px; height: 64px; object-fit: cover; border-radius: 10px;
+  vertical-align: middle; margin: 0 6px; }
+.tanpa-foto { color: #777; font-style: italic; }
+.anak-list { list-style: none; padding-left: 0; }
+.anak-list li { display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  padding: 6px 0; border-bottom: 1px solid #eee; }
+.anak-label { background: #5b3a8e; color: #fff; border-radius: 999px; padding: 2px 10px;
+  font-size: .82rem; font-weight: 600; }
+.pratinjau-foto { display: block; max-width: 220px; border-radius: 10px; margin-top: 8px; }
+/* Banner & wallpaper halaman publik (diatur admin di Pengaturan) */
+.banner { display: block; width: 100%; max-height: 280px; object-fit: cover;
+  border-radius: 12px; margin-bottom: 14px; }
+.pratinjau-atur { display: block; width: 100%; max-width: 420px; max-height: 200px;
+  object-fit: cover; border-radius: 10px; margin: 6px 0; }
