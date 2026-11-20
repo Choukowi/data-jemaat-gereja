@@ -5,14 +5,16 @@ Stack: Python 3 standard library SAJA (http.server + sqlite3).
 Tanpa framework web dan tanpa library eksternal sama sekali.
 
 Dua sisi aplikasi:
-1. PUBLIK (tanpa login): jemaat mengecek data keluarganya.
-   - Cari dengan NIK (tepat 16 digit, milik kepala keluarga ATAU pasangan)
-     -> tampil KARTU KELUARGA LENGKAP: foto nikah, status perkawinan,
-        tanggal menikah, nama kepala keluarga, nama pasangan, dan daftar
-        anak (Anak 1, Anak 2, ...) beserta foto tiap anak bila ada.
-   - Cari dengan NAMA (sebagian nama) -> tampil DAFTAR MINIMAL saja:
-        nama kepala keluarga, nama pasangan, status perkawinan.
-        TANPA foto, TANPA anak, TANPA tanggal menikah, TANPA NIK.
+1. PUBLIK (tanpa login): halaman sangat minimal — banner (bila diatur),
+   judul "Cari Keluarga (Nama/NIK)", dan SATU formulir pencarian (input q).
+   - Bila q tepat 16 digit angka, q diperlakukan sebagai NIK (milik kepala
+     keluarga ATAU pasangan) -> tampil KARTU KELUARGA LENGKAP: foto nikah,
+        status perkawinan, tanggal menikah, nama kepala keluarga, nama
+        pasangan, dan daftar anak (Anak 1, Anak 2, ...) beserta foto tiap
+        anak bila ada.
+   - Selain itu q diperlakukan sebagai NAMA (sebagian nama) -> tampil
+        DAFTAR MINIMAL saja: nama kepala keluarga, nama pasangan, status
+        perkawinan. TANPA foto, TANPA anak, TANPA tanggal menikah, TANPA NIK.
         Pengaman ini SENGAJA: detail lengkap + foto hanya bisa dibuka
         dengan NIK yang tepat.
 2. ADMIN (satu akun admin, wajib login): mengelola data keluarga & anak,
@@ -205,31 +207,40 @@ def delete_upload(name):
 # ---------------------------------------------------------------------------
 # HTML layout
 # ---------------------------------------------------------------------------
-def layout(user, church, title, body, flash="", bg=None):
+def layout(user, church, title, body, flash="", bg=None, publik=False):
     # bg: nama berkas wallpaper (dari Pengaturan) untuk latar halaman publik.
     # Bila kosong, halaman memakai latar polos bawaan dari style.css.
+    # publik=True: tampilan halaman publik yang sangat minimal — tanpa header
+    # (nama gereja hanya di <title>), tanpa nav, tanpa footer.
     bg_style = ""
     if bg:
         bg_style = (f"<style>body{{background-image:url('/foto/{esc(bg)}');"
                     "background-size:cover;background-position:center;"
                     "background-attachment:fixed;}</style>")
-    nav = ""
-    if user:
-        nav = ('<a href="/admin">Dashboard</a><a href="/admin/keluarga/baru">Tambah Keluarga</a>'
-               '<a href="/admin/pengaturan">Pengaturan</a><a href="/">Lihat Halaman Publik</a>'
-               '<a href="/logout">Keluar</a>')
-    else:
-        nav = '<a href="/">Cari Data Keluarga</a><a href="/login">Masuk Admin</a>'
     flash_html = f'<div class="flash">{esc(flash)}</div>' if flash else ""
-    user_html = (f'<div class="userbar">Masuk sebagai {esc(user["nama"])}</div>') if user else ""
+    if publik:
+        header_html = ""
+        footer_html = ""
+    else:
+        nav = ""
+        if user:
+            nav = ('<a href="/admin">Dashboard</a><a href="/admin/keluarga/baru">Tambah Keluarga</a>'
+                   '<a href="/admin/pengaturan">Pengaturan</a><a href="/">Lihat Halaman Publik</a>'
+                   '<a href="/logout">Keluar</a>')
+        else:
+            nav = '<a href="/">Cari Data Keluarga</a><a href="/login">Masuk Admin</a>'
+        user_html = (f'<div class="userbar">Masuk sebagai {esc(user["nama"])}</div>') if user else ""
+        header_html = f"<header><h1>{esc(church)}</h1>{user_html}<nav>{nav}</nav></header>"
+        footer_html = ("<footer><small>Direktori Keluarga Jemaat &bull; Detail lengkap "
+                       "hanya tampil dengan NIK yang tepat</small></footer>")
     return f"""<!DOCTYPE html>
 <html lang="id"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)} - {esc(church)}</title>
 <link rel="stylesheet" href="/static/style.css">{bg_style}</head>
-<body><header><h1>{esc(church)}</h1>{user_html}<nav>{nav}</nav></header>
+<body>{header_html}
 <main>{flash_html}{body}</main>
-<footer><small>Direktori Keluarga Jemaat &bull; Detail lengkap hanya tampil dengan NIK yang tepat</small></footer>
+{footer_html}
 <script src="/static/app.js"></script>
 </body></html>"""
 
@@ -508,19 +519,20 @@ class Handler(BaseHTTPRequestHandler):
     # PUBLIK: pencarian jemaat
     # -----------------------------------------------------------------------
     def home(self, qs, flash):
+        # Halaman publik yang sangat minimal: banner (bila diatur admin),
+        # judul, SATU formulir pencarian (input "q" + tombol "Cari"), dan
+        # hasil. Tanpa nav, tanpa header nama gereja, tanpa footer.
+        # Pencarian terpadu: q yang tepat 16 digit angka -> alur NIK persis
+        # (kartu lengkap); selain itu -> alur nama sebagian (daftar minimal).
         conn = db()
         church = nama_gereja(conn)
         hasil = ""
-        mode = (qs.get("cari") or [""])[0]
-        if mode == "nik":
-            nik = re.sub(r"\D", "", (qs.get("nik") or [""])[0])
-            if not valid_nik(nik):
-                hasil = ('<div class="flash warn">NIK harus tepat 16 digit angka. '
-                         'Periksa lagi NIK pada KTP kepala keluarga atau pasangan.</div>')
-            else:
+        q = (qs.get("q") or [""])[0].strip()
+        if q:
+            if valid_nik(q):
                 fam = conn.execute(
                     "SELECT * FROM families WHERE kepala_nik=? OR pasangan_nik=?",
-                    (nik, nik)).fetchone()
+                    (q, q)).fetchone()
                 if fam:
                     anak = conn.execute(
                         "SELECT * FROM children WHERE family_id=? ORDER BY urutan, id",
@@ -530,9 +542,7 @@ class Handler(BaseHTTPRequestHandler):
                     hasil = ('<div class="flash warn">Data keluarga dengan NIK itu tidak '
                              'ditemukan. Pastikan NIK sudah benar (16 digit, milik kepala '
                              'keluarga atau pasangan), atau hubungi admin/pengurus gereja.</div>')
-        elif mode == "nama":
-            q = (qs.get("nama") or [""])[0].strip()
-            if len(q) < 2:
+            elif len(q) < 2:
                 hasil = ('<div class="flash warn">Ketik minimal 2 huruf dari nama kepala '
                          'keluarga atau pasangan.</div>')
             else:
@@ -547,8 +557,8 @@ class Handler(BaseHTTPRequestHandler):
                         &mdash; pasangan: {esc(r['pasangan_nama'] or '-')}
                         &mdash; status: {esc(r['status'])}<br>
                         <small>Untuk melihat foto dan detail lengkap keluarga ini,
-                        cari dengan <b>NIK</b> kepala keluarga / pasangan pada formulir
-                        NIK di atas.</small></li>""" for r in rows)
+                        cari dengan <b>NIK</b> kepala keluarga / pasangan.</small></li>"""
+                        for r in rows)
                     hasil = (f'<section class="panel"><h3>Hasil pencarian nama</h3>'
                              f'<ul>{items}</ul></section>')
                 else:
@@ -558,31 +568,14 @@ class Handler(BaseHTTPRequestHandler):
         wallpaper = get_setting(conn, "wallpaper_foto", "")
         conn.close()
         banner_html = (f'<img class="banner" src="/foto/{esc(banner)}" '
-                       f'alt="Banner {esc(church)}">' if banner else "")
-        body = f"""{banner_html}<h2>Cari Data Keluarga Jemaat</h2>
-        <p>Selamat datang di direktori keluarga {esc(church)}. Silakan cek data
-        keluarga Anda dengan salah satu cara berikut.</p>
-        <section class="panel"><h3>Cari dengan NIK (detail lengkap)</h3>
-        <p><small>Masukkan NIK kepala keluarga atau NIK pasangan (16 digit).
-        Bila NIK tepat, kartu keluarga lengkap akan tampil: foto pernikahan,
-        status &amp; tanggal menikah, dan daftar anak.</small></p>
+                       f'alt="Banner">' if banner else "")
+        body = f"""{banner_html}<h2>Cari Keluarga (Nama/NIK)</h2>
         <form method="get" action="/">
-          <input type="hidden" name="cari" value="nik">
-          <label>NIK (16 digit) <input name="nik" inputmode="numeric" autocomplete="off"
-            maxlength="16" placeholder="mis. 3201xxxxxxxxxxxx" required></label>
-          <button type="submit">Cari dengan NIK</button></form></section>
-        <section class="panel"><h3>Cari dengan Nama (daftar singkat)</h3>
-        <p><small>Pencarian nama hanya menampilkan daftar singkat (nama kepala
-        keluarga, pasangan, status). Foto, anak, tanggal menikah, dan NIK
-        <b>tidak</b> ditampilkan — detail lengkap hanya bisa dibuka dengan NIK.</small></p>
-        <form method="get" action="/">
-          <input type="hidden" name="cari" value="nama">
-          <label>Nama kepala keluarga / pasangan <input name="nama" autocomplete="off"
-            placeholder="mis. Budi" required></label>
-          <button type="submit">Cari dengan Nama</button></form></section>
+          <input name="q" autocomplete="off">
+          <button type="submit">Cari</button></form>
         {hasil}"""
-        return self.send_html(layout(None, church, "Cari Data Keluarga", body, flash,
-                                     bg=wallpaper or None))
+        return self.send_html(layout(None, church, "Cari Keluarga (Nama/NIK)", body, flash,
+                                     bg=wallpaper or None, publik=True))
 
     def kartu_keluarga_lengkap(self, fam, anak):
         """Kartu lengkap — HANYA dirender untuk pencarian NIK yang tepat.

@@ -8,15 +8,20 @@ database & folder unggahan SEMENTARA (di /tmp), lalu memeriksanya:
 
 Yang dibuktikan:
 - GET / dan GET /login -> 200
+- Halaman publik SANGAT minimal: judul persis "Cari Keluarga (Nama/NIK)",
+  tepat SATU formulir dengan SATU input teks "q" dan tombol "Cari",
+  TANPA nav "Masuk Admin", TANPA field tersembunyi cari=nik/cari=nama,
+  TANPA teks penjelasan lama, TANPA footer; nama gereja hanya di <title>
 - Halaman admin tanpa login diarahkan ke /login
 - Login admin berhasil
 - Buat keluarga (kepala + pasangan + status + tanggal menikah) + unggah foto nikah
 - NIK duplikat ditolak
 - Tambah dua anak, salah satunya dengan foto; foto bisa diambil kembali
-- Pencarian publik dengan NIK -> kartu LENGKAP (termasuk nama anak & foto)
-- Pencarian publik dengan NIK pasangan -> kartu lengkap juga
-- Pencarian publik dengan NAMA -> hanya info minimal:
+- Pencarian terpadu: q = NIK kepala -> kartu LENGKAP (nama anak & foto)
+- Pencarian terpadu: q = NIK pasangan -> kartu lengkap juga
+- Pencarian terpadu: q = potongan NAMA -> hanya info minimal:
   TANPA URL foto, TANPA nama anak, TANPA NIK, TANPA tanggal menikah
+- q kosong -> halaman polos tanpa pesan error
 - NIK tidak ditemukan -> pesan ramah
 - Admin mengunggah BANNER & WALLPAPER di Pengaturan -> keduanya tersaji
   lewat /foto/ dan dirujuk oleh halaman publik; menghapus banner
@@ -102,9 +107,25 @@ def main():
         must(siap, "server uji menyala")
 
         publik = client()
-        # 1. Halaman publik & login tampil
+        # 1. Halaman publik & login tampil; halaman publik sangat minimal
         s, url, home = req(publik, "/")
-        must(s == 200 and "Cari Data Keluarga" in home, "GET / -> 200 dan ada formulir pencarian")
+        must(s == 200, "GET / -> 200")
+        must("<h2>Cari Keluarga (Nama/NIK)</h2>" in home,
+             "halaman publik: judul persis 'Cari Keluarga (Nama/NIK)'")
+        must(home.count("<form") == 1 and home.count('name="q"') == 1
+             and ">Cari</button>" in home,
+             "halaman publik: tepat SATU formulir, SATU input q, tombol 'Cari'")
+        must("Masuk Admin" not in home and "<nav>" not in home,
+             "halaman publik: TANPA nav / tautan Masuk Admin")
+        must('name="cari"' not in home and 'name="nik"' not in home
+             and 'name="nama"' not in home,
+             "halaman publik: TANPA field tersembunyi cari=nik/cari=nama")
+        must("Selamat datang di direktori keluarga" not in home
+             and "Cari dengan NIK (detail lengkap)" not in home
+             and "Cari dengan Nama (daftar singkat)" not in home,
+             "halaman publik: TANPA teks penjelasan lama")
+        must("<footer>" not in home and "Direktori Keluarga Jemaat" not in home,
+             "halaman publik: TANPA footer")
         s, url, login_page = req(publik, "/login")
         must(s == 200 and "Masuk Admin" in login_page, "GET /login -> 200")
 
@@ -151,46 +172,60 @@ def main():
         must("Anak Uji Satu" in form_page and "Anak Uji Dua" in form_page,
              "dua anak tampil di halaman admin keluarga")
 
-        # 7. Pencarian publik dengan NIK kepala -> kartu lengkap
-        q = urllib.parse.urlencode({"cari": "nik", "nik": NIK_KEPALA})
+        # 7. Pencarian terpadu: q = NIK kepala (16 digit) -> kartu lengkap
+        q = urllib.parse.urlencode({"q": NIK_KEPALA})
         s, url, kartu = req(publik, "/?" + q)
         must("Budi Uji Santoso" in kartu and "Sari Uji Rahayu" in kartu
              and "Menikah" in kartu and TGL_ID in kartu,
-             "NIK kepala: kartu lengkap berisi nama, status, tanggal menikah terbaca")
+             "q=NIK kepala: kartu lengkap berisi nama, status, tanggal menikah terbaca")
         must("Anak Uji Satu" in kartu and "Anak Uji Dua" in kartu
              and "Anak 1" in kartu and "Anak 2" in kartu,
-             "NIK kepala: daftar anak tampil dengan label Anak 1 & Anak 2")
-        must("/foto/" in kartu, "NIK kepala: foto (nikah/anak) tampil di kartu lengkap")
+             "q=NIK kepala: daftar anak tampil dengan label Anak 1 & Anak 2")
+        must("/foto/" in kartu, "q=NIK kepala: foto (nikah/anak) tampil di kartu lengkap")
 
-        # 8. Pencarian publik dengan NIK pasangan -> kartu lengkap juga
-        q = urllib.parse.urlencode({"cari": "nik", "nik": NIK_PASANGAN})
+        # 8. Pencarian terpadu: q = NIK pasangan -> kartu lengkap juga
+        q = urllib.parse.urlencode({"q": NIK_PASANGAN})
         s, url, kartu2 = req(publik, "/?" + q)
         must("Anak Uji Satu" in kartu2 and "/foto/" in kartu2,
-             "NIK pasangan: kartu lengkap tampil juga")
+             "q=NIK pasangan: kartu lengkap tampil juga")
 
-        # 9. Pencarian publik dengan NAMA -> HANYA info minimal
-        q = urllib.parse.urlencode({"cari": "nama", "nama": "Budi Uji"})
+        # 9. Pencarian terpadu: q = potongan NAMA -> HANYA info minimal
+        q = urllib.parse.urlencode({"q": "Budi Uji"})
         s, url, daftar = req(publik, "/?" + q)
         must("Budi Uji Santoso" in daftar and "Sari Uji Rahayu" in daftar
              and "Menikah" in daftar,
-             "nama: daftar minimal berisi nama kepala, pasangan, status")
-        must("/foto/" not in daftar, "nama: TIDAK ada URL foto sama sekali")
+             "q=nama: daftar minimal berisi nama kepala, pasangan, status")
+        must("detail lengkap" in daftar and "NIK" in daftar,
+             "q=nama: ada satu baris petunjuk untuk mencari dengan NIK")
+        must("/foto/" not in daftar, "q=nama: TIDAK ada URL foto sama sekali")
         must("Anak Uji Satu" not in daftar and "Anak Uji Dua" not in daftar,
-             "nama: TIDAK ada nama anak")
+             "q=nama: TIDAK ada nama anak")
         must(NIK_KEPALA not in daftar and NIK_PASANGAN not in daftar,
-             "nama: TIDAK ada NIK yang bocor")
+             "q=nama: TIDAK ada NIK yang bocor")
         must(TGL_ISO not in daftar and TGL_ID not in daftar,
-             "nama: TIDAK ada tanggal menikah")
+             "q=nama: TIDAK ada tanggal menikah")
 
-        # 10. NIK tidak ditemukan -> pesan ramah
-        q = urllib.parse.urlencode({"cari": "nik", "nik": "9999999999999999"})
+        # 10. Tidak ditemukan -> pesan ramah; q kosong -> halaman polos
+        q = urllib.parse.urlencode({"q": "9999999999999999"})
         s, url, kosong = req(publik, "/?" + q)
-        must("tidak ditemukan" in kosong, "NIK tak dikenal -> pesan ramah 'tidak ditemukan'")
+        must("tidak ditemukan" in kosong, "q=NIK tak dikenal -> pesan ramah 'tidak ditemukan'")
+        q = urllib.parse.urlencode({"q": "Zzz Namaacak"})
+        s, url, kosong2 = req(publik, "/?" + q)
+        must("Tidak ada keluarga dengan nama itu" in kosong2,
+             "q=nama tak dikenal -> pesan ramah tidak ditemukan")
+        s, url, polos = req(publik, "/?q=")
+        must("<h2>Cari Keluarga (Nama/NIK)</h2>" in polos
+             and "tidak ditemukan" not in polos and "flash warn" not in polos,
+             "q kosong -> halaman polos tanpa pesan error")
 
-        # 11. Pengaturan nama gereja
+        # 11. Pengaturan nama gereja -> di halaman publik HANYA di <title>
         req(admin, "/admin/pengaturan", {"nama_gereja": "GKI Uji Sejahtera"})
         s, url, home2 = req(publik, "/")
-        must("GKI Uji Sejahtera" in home2, "nama gereja dari Pengaturan tampil di halaman publik")
+        m_title = re.search(r"<title>(.*?)</title>", home2)
+        must(m_title is not None and "GKI Uji Sejahtera" in m_title.group(1),
+             "nama gereja dari Pengaturan tampil di <title> halaman publik")
+        must("<h1>" not in home2 and "<header>" not in home2,
+             "halaman publik: TANPA header berisi nama gereja")
 
         # 12. Banner & wallpaper halaman publik (diunggah admin di Pengaturan)
         s, url, home_tanpa = req(publik, "/")
