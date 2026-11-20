@@ -30,9 +30,14 @@ Yang dibuktikan:
   (menghapus ?q=... dari address bar, jadi REFRESH membuka halaman awal
   yang polos) + tautan "↺ Cari Lagi" (href="/"); halaman polos tanpa q
   TIDAK memuat keduanya
+- Backup & Pulihkan (khusus admin): unduh ZIP berisi jemaat.db +
+  manifest.json (app="data-jemaat-gereja") + foto di uploads/;
+  memulihkan ZIP itu di server BARU yang kosong mengembalikan keluarga,
+  foto, dan kartu publiknya; berkas non-ZIP dan ZIP milik aplikasi lain
+  ditolak tanpa mengubah data
 """
-import os, re, subprocess, sys, tempfile, time, urllib.request, urllib.parse
-import urllib.error, http.cookiejar, uuid
+import io, json, os, re, subprocess, sys, tempfile, time, urllib.request, urllib.parse
+import urllib.error, http.cookiejar, uuid, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("TEST_PORT", "8791"))
@@ -81,6 +86,12 @@ def req_multipart(op, path, fields, files):
         BASE + path, data=body,
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}))
     return r.status, r.geturl(), r.read().decode("utf-8", "replace")
+
+
+def req_bytes(op, path):
+    """GET yang mengembalikan body sebagai bytes (untuk unduhan ZIP)."""
+    r = op.open(BASE + path)
+    return r.status, r.geturl(), r.headers, r.read()
 
 
 def must(cond, msg):
@@ -282,6 +293,109 @@ def main():
              "halaman polos tanpa q: TIDAK ada skrip history.replaceState")
         must("Cari Lagi" not in polos2,
              "halaman polos tanpa q: TIDAK ada tautan 'Cari Lagi'")
+
+        # 14. Backup & Pulihkan: halaman khusus admin, unduh ZIP lengkap,
+        # dan penolakan berkas yang salah (data tidak berubah).
+        s, url, _ = req(publik, "/admin/backup")
+        must("/login" in url, f"GET /admin/backup tanpa login diarahkan ke login -> {url}")
+        s, url, hal_backup = req(admin, "/admin/backup")
+        must(s == 200 and "/admin/backup/unduh" in hal_backup
+             and 'name="berkas"' in hal_backup and "MENGGANTI" in hal_backup,
+             "halaman Backup & Pulihkan: tautan unduh + formulir pulihkan + peringatan tampil")
+        s, url, hdr, zip_bytes = req_bytes(admin, "/admin/backup/unduh")
+        must(s == 200 and hdr.get_content_type() == "application/zip",
+             "GET /admin/backup/unduh -> 200 application/zip")
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+        names = zf.namelist()
+        must("jemaat.db" in names and "manifest.json" in names,
+             "zip backup berisi jemaat.db + manifest.json")
+        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        must(manifest.get("app") == "data-jemaat-gereja" and manifest.get("versi") == 1
+             and "dibuat" in manifest,
+             "manifest backup: app='data-jemaat-gereja', versi=1, ada cap waktu")
+        foto_zip = "uploads/" + m_foto.group(1)
+        must(foto_zip in names and zf.read(foto_zip) == PNG_1PX,
+             "zip backup berisi foto keluarga di uploads/ (utuh)")
+        # Pulihkan berkas BUKAN zip -> ditolak, data tidak berubah.
+        s, url, page = req_multipart(
+            admin, "/admin/backup/pulihkan", {},
+            {"berkas": ("bukan.zip", b"ini bukan zip sama sekali", "application/zip")})
+        must("tidak valid" in page, "pulihkan berkas non-ZIP ditolak")
+        s, url, dash = req(admin, "/admin")
+        must("Budi Uji Santoso" in dash,
+             "setelah pulihkan non-ZIP gagal: data keluarga tetap ada")
+        # Pulihkan zip milik APLIKASI LAIN -> ditolak dengan pesan khusus.
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("manifest.json", json.dumps({"app": "aplikasi-lain", "versi": 1}))
+            z.writestr("jemaat.db", b"database palsu")
+        s, url, page = req_multipart(
+            admin, "/admin/backup/pulihkan", {},
+            {"berkas": ("backup-lain.zip", buf.getvalue(), "application/zip")})
+        must("Berkas ini bukan backup aplikasi data jemaat." in page,
+             "pulihkan zip aplikasi lain ditolak dengan pesan khusus")
+        s, url, dash = req(admin, "/admin")
+        must("Budi Uji Santoso" in dash,
+             "setelah pulihkan zip aplikasi lain gagal: data keluarga tetap ada")
+
+        # 15. Pulihkan backup yang sama di server BARU yang benar-benar
+        # kosong -> keluarga, foto, dan kartu publiknya kembali semua.
+        proc.terminate()
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            proc.kill()
+            proc.communicate()
+        tmp2 = tempfile.mkdtemp(prefix="jemaat-test-pulih-")
+        env2 = dict(os.environ)
+        env2["JEMAAT_DB"] = os.path.join(tmp2, "sub", "jemaat.db")
+        env2["JEMAAT_UPLOADS"] = os.path.join(tmp2, "uploads")
+        env2["PORT"] = str(PORT)
+        proc2 = subprocess.Popen(
+            [sys.executable, os.path.join(HERE, "app.py")],
+            env=env2, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            siap2 = False
+            for _ in range(50):
+                try:
+                    urllib.request.urlopen(BASE + "/login", timeout=2)
+                    siap2 = True
+                    break
+                except Exception:
+                    time.sleep(0.2)
+            must(siap2, "server uji kedua (masih kosong) menyala")
+            admin2 = client()
+            s, url, _ = req(admin2, "/login", {"username": "admin", "password": "admin123"})
+            must("/admin" in url, "login admin di server kosong berhasil")
+            s, url, dash_kosong = req(admin2, "/admin")
+            must("Budi Uji Santoso" not in dash_kosong,
+                 "server kosong: keluarga memang belum ada")
+            s, url, page = req_multipart(
+                admin2, "/admin/backup/pulihkan", {},
+                {"berkas": ("backup-jemaat.zip", zip_bytes, "application/zip")})
+            must("/login" in url and "Backup dipulihkan. Silakan masuk lagi." in page,
+                 f"pulihkan backup -> diarahkan ke login + pesan sukses -> {url}")
+            s, url, _ = req(admin2, "/login", {"username": "admin", "password": "admin123"})
+            must("/admin" in url, "login lagi setelah pulihkan berhasil")
+            s, url, dash2 = req(admin2, "/admin")
+            must("Budi Uji Santoso" in dash2,
+                 "setelah pulihkan: keluarga kembali di daftar admin")
+            r = admin2.open(BASE + "/foto/" + m_foto.group(1))
+            must(r.status == 200 and r.read() == PNG_1PX,
+                 "setelah pulihkan: foto keluarga tersaji lagi lewat /foto/ (utuh)")
+            q = urllib.parse.urlencode({"q": NIK_KEPALA})
+            s, url, kartu_pulih = req(publik, "/?" + q)
+            must("Budi Uji Santoso" in kartu_pulih and "Anak Uji Satu" in kartu_pulih,
+                 "setelah pulihkan: pencarian NIK publik menemukan kartu keluarga lagi")
+            must(os.path.isfile(os.path.join(tmp2, "sub", "jemaat-sebelum-pulih.db")),
+                 "salinan pengaman jemaat-sebelum-pulih.db tersimpan di samping DB aktif")
+        finally:
+            proc2.terminate()
+            try:
+                proc2.communicate(timeout=5)
+            except Exception:
+                proc2.kill()
+                proc2.communicate()
 
         print("\nSEMUA UJI LULUS")
     finally:

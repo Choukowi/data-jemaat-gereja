@@ -25,13 +25,19 @@ Jalankan:  python3 app.py            (default http://127.0.0.1:8000)
            PORT=8080 python3 app.py
            JEMAAT_DB=/path/jemaat.db JEMAAT_UPLOADS=/path/uploads python3 app.py
 """
+import datetime
 import hashlib
 import html
+import io
+import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
+import tempfile
 import urllib.parse
+import zipfile
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -44,6 +50,7 @@ STATUS_PERKAWINAN = ("Menikah", "Belum Menikah", "Cerai Hidup", "Cerai Mati")
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_FOTO_BYTES = 5 * 1024 * 1024          # ~5 MB per foto
 MAX_BODY_BYTES = 12 * 1024 * 1024         # batas total satu request multipart
+MAX_BACKUP_BYTES = 200 * 1024 * 1024      # berkas backup boleh besar (banyak foto)
 FOTO_NAME_RE = re.compile(r"[a-f0-9]{24}\.(?:jpg|jpeg|png|webp)")
 BULAN_ID = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
             "Agustus", "September", "Oktober", "November", "Desember"]
@@ -227,7 +234,8 @@ def layout(user, church, title, body, flash="", bg=None, publik=False, extra_scr
         nav = ""
         if user:
             nav = ('<a href="/admin">Dashboard</a><a href="/admin/keluarga/baru">Tambah Keluarga</a>'
-                   '<a href="/admin/pengaturan">Pengaturan</a><a href="/">Lihat Halaman Publik</a>'
+                   '<a href="/admin/pengaturan">Pengaturan</a><a href="/admin/backup">Backup &amp; Pulihkan</a>'
+                   '<a href="/">Lihat Halaman Publik</a>'
                    '<a href="/logout">Keluar</a>')
         else:
             nav = '<a href="/">Cari Data Keluarga</a><a href="/login">Masuk Admin</a>'
@@ -267,6 +275,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_bytes(self, data, ctype, filename=None):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(data)
+
     def redirect(self, path, flash="", set_cookie=None):
         headers = []
         if set_cookie:
@@ -301,7 +318,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.parse_qs(raw)
         return {k: v[0] for k, v in parsed.items()}
 
-    def parse_multipart(self):
+    def parse_multipart(self, max_bytes=MAX_BODY_BYTES):
         """Parser multipart/form-data minimal (standard library saja).
         Kembalikan (fields, files); files: nama_field -> (nama_berkas, bytes)."""
         ctype = self.headers.get("Content-Type", "")
@@ -310,7 +327,7 @@ class Handler(BaseHTTPRequestHandler):
             return {}, {}
         boundary = m.group(1).strip().strip('"')
         length = int(self.headers.get("Content-Length", "0") or "0")
-        if length > MAX_BODY_BYTES:
+        if length > max_bytes:
             raise ValueError("Ukuran unggahan terlalu besar (maksimal sekitar 5 MB per foto).")
         body = self.rfile.read(length) if length else b""
         delim = b"--" + boundary.encode("utf-8")
@@ -409,6 +426,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.admin_keluarga_form(user, None, flash)
         if path == "/admin/pengaturan":
             return self.admin_pengaturan(user, flash)
+        if path == "/admin/backup":
+            return self.admin_backup(user, flash)
+        if path == "/admin/backup/unduh":
+            return self.admin_backup_unduh(user)
         if path.startswith("/admin/keluarga/"):
             try:
                 fid = int(path.split("/")[3])
@@ -434,6 +455,14 @@ class Handler(BaseHTTPRequestHandler):
         user = self.current_user()
         if not user:
             return self.redirect("/login", "Silakan masuk dulu.")
+        if path == "/admin/backup/pulihkan":
+            # Berkas backup bisa jauh lebih besar dari unggahan foto biasa,
+            # jadi dibaca dengan batas ukuran khusus backup.
+            try:
+                _f, files = self.parse_multipart(MAX_BACKUP_BYTES)
+            except ValueError as e:
+                return self.redirect("/admin/backup", str(e))
+            return self.post_backup_pulihkan(user, files)
         f, files = self.read_form()
         if path == "/admin/pengaturan":
             return self.post_pengaturan(user, f)
@@ -976,6 +1005,10 @@ class Handler(BaseHTTPRequestHandler):
           <button type="submit">Simpan Nama Gereja</button></form></section>
         {seksi_banner}
         {seksi_wallpaper}
+        <section class="panel"><h3>Backup &amp; Pulihkan</h3>
+        <p><small>Unduh satu berkas ZIP berisi seluruh data &amp; foto, atau
+        pulihkan data dari berkas backup.</small></p>
+        <p><a href="/admin/backup"><button type="button">Buka Backup &amp; Pulihkan</button></a></p></section>
         <section class="panel"><h3>Ganti Password Admin</h3>
         <form method="post" action="/ganti-password">
           <label>Password baru <input name="password" type="password" required minlength="8"></label>
@@ -1037,6 +1070,138 @@ class Handler(BaseHTTPRequestHandler):
         conn.commit()
         conn.close()
         return self.redirect("/admin", "Password berhasil diganti.")
+
+    # -- admin: backup & pulihkan ---------------------------------------------
+    def admin_backup(self, user, flash):
+        church = self.church()
+        body = """<h2>Backup &amp; Pulihkan</h2>
+        <section class="panel"><h3>Unduh Backup</h3>
+        <p><small>Satu berkas ZIP berisi SELURUH data aplikasi ini: database
+        (semua keluarga, anak, akun admin, dan pengaturan) serta semua berkas
+        foto (foto keluarga, banner, dan wallpaper). Simpan berkas ini di
+        tempat yang aman — berkas inilah yang dipakai untuk memulihkan data
+        bila suatu saat data di server hilang.</small></p>
+        <p><a href="/admin/backup/unduh"><button type="button">Unduh Backup (.zip)</button></a></p></section>
+        <section class="panel"><h3>Pulihkan dari Backup</h3>
+        <div class="flash warn">PERINGATAN: memulihkan backup akan MENGGANTI
+        SELURUH data saat ini (semua keluarga, anak, foto, banner, wallpaper,
+        dan pengaturan) dengan isi berkas backup. Data yang ada sekarang akan
+        hilang. Bila ragu, unduh backup terbaru dulu sebelum memulihkan.</div>
+        <form method="post" action="/admin/backup/pulihkan" enctype="multipart/form-data"
+          onsubmit="return confirm('Pulihkan backup ini? SELURUH data saat ini akan diganti dengan isi backup.')">
+          <label>Berkas backup (.zip) <input name="berkas" type="file" accept=".zip" required></label>
+          <button type="submit" class="danger">Pulihkan Backup</button></form></section>"""
+        return self.send_html(layout(user, church, "Backup & Pulihkan", body, flash))
+
+    def admin_backup_unduh(self, user):
+        """Bangun ZIP backup saat itu juga: salinan database yang konsisten
+        (lewat sqlite3 backup API), semua berkas di folder uploads di bawah
+        uploads/, dan manifest.json penanda aplikasi."""
+        tmpdir = tempfile.mkdtemp(prefix="jemaat-backup-")
+        try:
+            db_copy = os.path.join(tmpdir, "jemaat.db")
+            src = sqlite3.connect(DB_PATH)
+            try:
+                dst = sqlite3.connect(db_copy)
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                z.write(db_copy, "jemaat.db")
+                if os.path.isdir(UPLOADS_DIR):
+                    for name in sorted(os.listdir(UPLOADS_DIR)):
+                        fpath = os.path.join(UPLOADS_DIR, name)
+                        if os.path.isfile(fpath):
+                            z.write(fpath, "uploads/" + name)
+                manifest = {
+                    "app": "data-jemaat-gereja",
+                    "dibuat": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "versi": 1,
+                }
+                z.writestr("manifest.json", json.dumps(manifest, indent=2))
+            data = buf.getvalue()
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        fname = "backup-jemaat-" + datetime.date.today().isoformat() + ".zip"
+        return self.send_bytes(data, "application/zip", fname)
+
+    def post_backup_pulihkan(self, user, files):
+        """Ganti database + isi folder uploads dengan isi berkas backup.
+        Semua validasi dilakukan SEBELUM ada berkas yang disentuh; bila
+        berkas ditolak, data saat ini tidak berubah sama sekali."""
+        back = "/admin/backup"
+        bukan = "Berkas ini bukan backup aplikasi data jemaat."
+        if "berkas" not in files or not files["berkas"][0]:
+            return self.redirect(back, "Pilih berkas backup (.zip) dulu.")
+        _fname, data = files["berkas"]
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            return self.redirect(back, "Berkas tidak valid — bukan file ZIP backup.")
+        names = set(zf.namelist())
+        if "manifest.json" not in names:
+            return self.redirect(back, bukan)
+        try:
+            manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        except Exception:
+            return self.redirect(back, bukan)
+        if not isinstance(manifest, dict) or manifest.get("app") != "data-jemaat-gereja":
+            return self.redirect(back, bukan)
+        if "jemaat.db" not in names:
+            return self.redirect(back, bukan)
+        tmpdir = tempfile.mkdtemp(prefix="jemaat-pulih-")
+        try:
+            db_baru = os.path.join(tmpdir, "jemaat.db")
+            try:
+                with open(db_baru, "wb") as fh:
+                    fh.write(zf.read("jemaat.db"))
+                uploads_baru = os.path.join(tmpdir, "uploads")
+                os.makedirs(uploads_baru, exist_ok=True)
+                for name in zf.namelist():
+                    if not name.startswith("uploads/"):
+                        continue
+                    base = os.path.basename(name)
+                    if not base or not FOTO_NAME_RE.fullmatch(base):
+                        continue  # lewati entri asing / upaya zip-slip
+                    with open(os.path.join(uploads_baru, base), "wb") as fh:
+                        fh.write(zf.read(name))
+            except (zipfile.BadZipFile, RuntimeError, OSError):
+                return self.redirect(back, "Berkas tidak valid — isi backup rusak.")
+            # Pastikan database di dalam backup utuh & memang milik aplikasi ini.
+            try:
+                cek = sqlite3.connect(db_baru)
+                tabel = {r[0] for r in cek.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                cek.close()
+            except sqlite3.Error:
+                return self.redirect(back, "Berkas tidak valid — database di dalam backup rusak.")
+            if not {"users", "families", "children", "settings"} <= tabel:
+                return self.redirect(back, "Berkas tidak valid — database di dalam backup tidak lengkap.")
+            # --- Semua validasi lolos: titik tukar data. ---
+            db_dir = os.path.dirname(DB_PATH) or "."
+            os.makedirs(db_dir, exist_ok=True)
+            if os.path.isfile(DB_PATH):
+                # Salinan pengaman data SEBELUM dipulihkan, di samping DB aktif.
+                shutil.copyfile(DB_PATH, os.path.join(db_dir, "jemaat-sebelum-pulih.db"))
+            os.makedirs(UPLOADS_DIR, exist_ok=True)
+            for lama in os.listdir(UPLOADS_DIR):
+                p = os.path.join(UPLOADS_DIR, lama)
+                if os.path.isfile(p):
+                    os.remove(p)
+            for name in os.listdir(uploads_baru):
+                shutil.copyfile(os.path.join(uploads_baru, name),
+                                os.path.join(UPLOADS_DIR, name))
+            shutil.copyfile(db_baru, DB_PATH)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        # Database berganti (termasuk akun admin di dalamnya): semua sesi
+        # login lama tidak berlaku lagi, admin masuk ulang dari /login.
+        LOGIN_SESSIONS.clear()
+        return self.redirect("/login", "Backup dipulihkan. Silakan masuk lagi.")
 
 
 def main():
