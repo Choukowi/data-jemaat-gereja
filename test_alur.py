@@ -26,6 +26,10 @@ Yang dibuktikan:
 - Admin mengunggah BANNER & WALLPAPER di Pengaturan -> keduanya tersaji
   lewat /foto/ dan dirujuk oleh halaman publik; menghapus banner
   mengembalikan halaman publik ke tampilan bawaan
+- Respons HASIL pencarian (nama & NIK) memuat skrip history.replaceState
+  (menghapus ?q=... dari address bar, jadi REFRESH membuka halaman awal
+  yang polos) + tautan "↺ Cari Lagi" (href="/"); halaman polos tanpa q
+  TIDAK memuat keduanya
 """
 import os, re, subprocess, sys, tempfile, time, urllib.request, urllib.parse
 import urllib.error, http.cookiejar, uuid
@@ -251,6 +255,33 @@ def main():
         s, url, home4 = req(publik, "/")
         must('class="banner"' not in home4 and "background-image" in home4,
              "setelah banner dihapus: banner hilang, wallpaper tetap tampil")
+
+        # 13. Refresh setelah mencari -> kembali ke halaman awal polos:
+        # respons hasil pencarian memuat skrip history.replaceState yang
+        # menghapus ?q=... dari address bar + tautan "Cari Lagi" ke "/";
+        # halaman polos tanpa q TIDAK memuat keduanya.
+        q = urllib.parse.urlencode({"q": "Budi Uji"})
+        s, url, daftar2 = req(publik, "/?" + q)
+        must("history.replaceState" in daftar2,
+             "hasil cari NAMA: memuat skrip history.replaceState")
+        must('<a href="/">↺ Cari Lagi</a>' in daftar2,
+             "hasil cari NAMA: ada tautan '↺ Cari Lagi' dengan href=\"/\"")
+        q = urllib.parse.urlencode({"q": NIK_KEPALA})
+        s, url, kartu3 = req(publik, "/?" + q)
+        must("history.replaceState" in kartu3,
+             "hasil cari NIK: memuat skrip history.replaceState")
+        must('<a href="/">↺ Cari Lagi</a>' in kartu3,
+             "hasil cari NIK: ada tautan '↺ Cari Lagi' dengan href=\"/\"")
+        q = urllib.parse.urlencode({"q": "9999999999999999"})
+        s, url, kosong3 = req(publik, "/?" + q)
+        must("history.replaceState" in kosong3
+             and '<a href="/">↺ Cari Lagi</a>' in kosong3,
+             "hasil TIDAK ditemukan: ada juga skrip replaceState + tautan '↺ Cari Lagi'")
+        s, url, polos2 = req(publik, "/")
+        must("history.replaceState" not in polos2,
+             "halaman polos tanpa q: TIDAK ada skrip history.replaceState")
+        must("Cari Lagi" not in polos2,
+             "halaman polos tanpa q: TIDAK ada tautan 'Cari Lagi'")
 
         print("\nSEMUA UJI LULUS")
     finally:

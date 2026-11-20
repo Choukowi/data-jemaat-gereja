@@ -207,11 +207,13 @@ def delete_upload(name):
 # ---------------------------------------------------------------------------
 # HTML layout
 # ---------------------------------------------------------------------------
-def layout(user, church, title, body, flash="", bg=None, publik=False):
+def layout(user, church, title, body, flash="", bg=None, publik=False, extra_script=""):
     # bg: nama berkas wallpaper (dari Pengaturan) untuk latar halaman publik.
     # Bila kosong, halaman memakai latar polos bawaan dari style.css.
     # publik=True: tampilan halaman publik yang sangat minimal — tanpa header
     # (nama gereja hanya di <title>), tanpa nav, tanpa footer.
+    # extra_script: skrip tambahan yang disisipkan persis sebelum </body>
+    # (dipakai halaman publik hasil pencarian untuk history.replaceState).
     bg_style = ""
     if bg:
         bg_style = (f"<style>body{{background-image:url('/foto/{esc(bg)}');"
@@ -241,7 +243,7 @@ def layout(user, church, title, body, flash="", bg=None, publik=False):
 <body>{header_html}
 <main>{flash_html}{body}</main>
 {footer_html}
-<script src="/static/app.js"></script>
+<script src="/static/app.js"></script>{extra_script}
 </body></html>"""
 
 
@@ -564,6 +566,16 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     hasil = ('<div class="flash warn">Tidak ada keluarga dengan nama itu. '
                              'Coba ejaan lain, atau cari langsung dengan NIK.</div>')
+        # Bila pencarian barusan dilakukan (ada hasil/pesan yang tampil):
+        # beri tautan "Cari Lagi" di bawah hasil, dan siapkan skrip kecil
+        # history.replaceState yang menghapus ?q=... dari address bar TANPA
+        # memuat ulang halaman. Hasil tetap terlihat, tetapi REFRESH
+        # sesudahnya membuka halaman awal yang polos — bukan mengulang
+        # pencarian. Halaman polos (tanpa q) tidak mendapat skrip ini.
+        skrip_refresh = ""
+        if hasil:
+            hasil += '<p class="cari-lagi"><a href="/">↺ Cari Lagi</a></p>'
+            skrip_refresh = "<script>history.replaceState(null, '', '/');</script>"
         banner = get_setting(conn, "banner_foto", "")
         wallpaper = get_setting(conn, "wallpaper_foto", "")
         conn.close()
@@ -575,7 +587,8 @@ class Handler(BaseHTTPRequestHandler):
           <button type="submit">Cari</button></form>
         {hasil}"""
         return self.send_html(layout(None, church, "Cari Keluarga (Nama/NIK)", body, flash,
-                                     bg=wallpaper or None, publik=True))
+                                     bg=wallpaper or None, publik=True,
+                                     extra_script=skrip_refresh))
 
     def kartu_keluarga_lengkap(self, fam, anak):
         """Kartu lengkap — HANYA dirender untuk pencarian NIK yang tepat.
