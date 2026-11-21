@@ -198,3 +198,19 @@ button.swatch.terpilih { outline: 3px solid var(--warna-aksen); outline-offset: 
   border-radius: var(--radius); margin-bottom: 14px; box-shadow: var(--bayangan); }
 .pratinjau-atur { display: block; width: 100%; max-width: 420px; max-height: 200px;
   object-fit: cover; border-radius: 10px; margin: 6px 0; }
+
+/* ---------- Tombol mata kolom password (dipasang app.js) ---------- */
+/* .pw-wrap menggantikan posisi input di alur label (margin-top sama
+   seperti input telanjang), input di dalamnya diberi ruang kanan agar
+   teks tidak tertutup tombol. .pw-toggle menimpa gaya button umum:
+   tanpa gradien/bayangan, menempel di sisi kanan kolom. */
+.pw-wrap { position: relative; display: block; margin-top: 4px; }
+.pw-wrap input { margin-top: 0; padding-right: 46px; }
+.pw-toggle { position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  display: flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; margin: 0; padding: 0;
+  background: transparent; box-shadow: none; border-radius: 8px;
+  color: var(--teks-redup); }
+.pw-toggle:hover { background: var(--warna-utama-muda);
+  color: var(--warna-utama-gelap); filter: none; }
+.pw-toggle svg { width: 20px; height: 20px; display: block; }
