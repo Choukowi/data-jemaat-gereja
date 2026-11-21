@@ -9,9 +9,21 @@ database & folder unggahan SEMENTARA (di /tmp), lalu memeriksanya:
 Yang dibuktikan:
 - GET / dan GET /login -> 200
 - Halaman publik SANGAT minimal: judul persis "Cari Keluarga (Nama/NIK)",
-  tepat SATU formulir dengan SATU input teks "q" dan tombol "Cari",
+  formulir pencarian dengan SATU input teks "q" dan tombol "Cari",
+  PLUS kartu "Login Jemaat" (input nik + password) di bawahnya,
   TANPA nav "Masuk Admin", TANPA field tersembunyi cari=nik/cari=nama,
   TANPA teks penjelasan lama, TANPA footer; nama gereja hanya di <title>
+- Kerangka aplikasi baru (sidebar + navigasi bawah, variabel palet
+  ungu/emas di CSS) tampil di dashboard admin & halaman jemaat
+- Dokumen keluarga (akta nikah PDF) & dokumen anak (akta kelahiran JPG):
+  unggah/ganti/hapus oleh admin; unduh lewat /dokumen/<id> hanya untuk
+  admin & jemaat pemilik; publik ditolak; nama berkas dokumen ditolak
+  route /foto/ (daftar putih foto)
+- Login jemaat: belum aktif -> pesan khusus; password diatur admin ->
+  login NIK kepala berhasil/gagal sesuai password; jemaat melihat kartu
+  + dokumennya sendiri saja (dokumen keluarga lain 404), tidak bisa
+  masuk area admin; ganti password & keluar berfungsi
+- Logo gereja dari Pengaturan tampil di halaman publik; dihapus -> hilang
 - Halaman admin tanpa login diarahkan ke /login
 - Login admin berhasil
 - Buat keluarga (kepala + pasangan + status + tanggal menikah) + unggah foto nikah
@@ -52,6 +64,12 @@ NIK_KEPALA = "3201010101800001"
 NIK_PASANGAN = "3201014101800002"
 TGL_ISO = "2010-05-12"
 TGL_ID = "12 Mei 2010"
+
+# Berkas dokumen uji (isi bebas; yang penting byte-nya bisa dibandingkan)
+PDF_AKTA = b"%PDF-1.4 berkas akta nikah uji\n%%EOF"
+PDF_AKTA_BARU = b"%PDF-1.4 berkas akta nikah PENGGANTI uji\n%%EOF"
+JPG_AKTA_LAHIR = b"\xff\xd8\xff\xe0 berkas akta kelahiran uji \xff\xd9"
+PNG_BAPTIS = PNG_1PX
 
 
 def client():
@@ -94,6 +112,17 @@ def req_bytes(op, path):
     return r.status, r.geturl(), r.headers, r.read()
 
 
+def status_saja(op, path):
+    """GET yang hanya mengembalikan kode status (tidak melempar di 404)."""
+    try:
+        r = op.open(BASE + path)
+        r.read()
+        return r.status
+    except urllib.error.HTTPError as e:
+        e.read()
+        return e.code
+
+
 def must(cond, msg):
     print(("OK  " if cond else "GAGAL ") + msg)
     if not cond:
@@ -127,13 +156,16 @@ def main():
         must(s == 200, "GET / -> 200")
         must("<h2>Cari Keluarga (Nama/NIK)</h2>" in home,
              "halaman publik: judul persis 'Cari Keluarga (Nama/NIK)'")
-        must(home.count("<form") == 1 and home.count('name="q"') == 1
-             and ">Cari</button>" in home,
-             "halaman publik: tepat SATU formulir, SATU input q, tombol 'Cari'")
+        must(home.count('name="q"') == 1 and ">Cari</button>" in home
+             and 'action="/"' in home,
+             "halaman publik: formulir pencarian SATU input q, tombol 'Cari'")
+        must('action="/login-jemaat"' in home and home.count('name="nik"') == 1
+             and home.count('name="password"') == 1
+             and "Login Jemaat" in home and home.count("<form") == 2,
+             "halaman publik: kartu Login Jemaat (nik + password) di bawah pencarian")
         must("Masuk Admin" not in home and "<nav>" not in home,
              "halaman publik: TANPA nav / tautan Masuk Admin")
-        must('name="cari"' not in home and 'name="nik"' not in home
-             and 'name="nama"' not in home,
+        must('name="cari"' not in home and 'name="nama"' not in home,
              "halaman publik: TANPA field tersembunyi cari=nik/cari=nama")
         must("Selamat datang di direktori keluarga" not in home
              and "Cari dengan NIK (detail lengkap)" not in home
@@ -294,6 +326,168 @@ def main():
         must("Cari Lagi" not in polos2,
              "halaman polos tanpa q: TIDAK ada tautan 'Cari Lagi'")
 
+        # 13A. Kerangka aplikasi baru: dashboard admin memakai sidebar +
+        # navigasi bawah; palet ungu/emas didefinisikan sebagai variabel CSS.
+        s, url, dash_shell = req(admin, "/admin")
+        must('class="sidebar"' in dash_shell and 'class="bottom-nav"' in dash_shell
+             and 'class="side-nav"' in dash_shell,
+             "dashboard admin: kerangka baru (sidebar + bottom-nav) tampil")
+        s, url, hdr_css, css_bytes = req_bytes(publik, "/static/style.css")
+        css = css_bytes.decode("utf-8", "replace")
+        must("--warna-utama:" in css and "--warna-aksen:" in css,
+             "style.css: variabel palet --warna-utama & --warna-aksen terdefinisi")
+
+        # 13B. Dokumen keluarga & anak: unggah oleh admin, unduh terlindungi.
+        unggahan = os.path.join(tmp, "uploads")
+        s, url, page = req_multipart(
+            admin, f"/admin/keluarga/{fid}/dokumen", {"jenis": "akta_nikah"},
+            {"dokumen": ("Akta Nikah Budi.pdf", PDF_AKTA, "application/pdf")})
+        must("Akta Nikah Budi.pdf" in page,
+             "dokumen akta nikah terunggah & tampil di Dokumen Keluarga")
+        m_dok = re.search(r'href="/dokumen/(\d+)"', page)
+        must(m_dok is not None, "tautan unduh /dokumen/<id> akta nikah ditemukan")
+        dok_akta_id = m_dok.group(1)
+        s, url, hdr_dok, data_dok = req_bytes(admin, f"/dokumen/{dok_akta_id}")
+        must(data_dok == PDF_AKTA
+             and "attachment" in (hdr_dok.get("Content-Disposition") or ""),
+             "admin mengunduh akta nikah: byte utuh + sebagai lampiran")
+        must(status_saja(publik, f"/dokumen/{dok_akta_id}") == 404,
+             "publik TANPA login tidak bisa mengunduh dokumen (404)")
+        dok_tersimpan = [n for n in os.listdir(unggahan)
+                         if n.startswith("dok-") and n.endswith(".pdf")]
+        must(len(dok_tersimpan) == 1,
+             "berkas dokumen tersimpan berpola dok-<token>.pdf")
+        must(status_saja(publik, "/foto/" + dok_tersimpan[0]) == 404,
+             "route /foto/ MENOLAK nama berkas dokumen (daftar putih)")
+        r = publik.open(BASE + "/foto/" + m_foto.group(1))
+        must(r.status == 200 and r.read() == PNG_1PX,
+             "route /foto/ tetap menyajikan foto sungguhan")
+        # Dokumen anak: akta kelahiran (JPG) untuk Anak Uji Satu.
+        m_anak = re.search(r"/admin/anak/(\d+)/edit", form_page)
+        must(m_anak is not None, "id anak pertama ditemukan di halaman keluarga")
+        cid_satu = m_anak.group(1)
+        s, url, page = req_multipart(
+            admin, f"/admin/keluarga/{fid}/anak/{cid_satu}/dokumen",
+            {"jenis": "akta_lahir"},
+            {"dokumen": ("Akta Lahir Satu.jpg", JPG_AKTA_LAHIR, "image/jpeg")})
+        must("Akta Lahir Satu.jpg" in page,
+             "dokumen akta kelahiran anak terunggah & tampil di baris anak")
+        m_dok_anak = re.search(
+            rf"/admin/keluarga/{fid}/anak/{cid_satu}/dokumen/(\d+)/hapus", page)
+        must(m_dok_anak is not None, "id dokumen akta kelahiran ditemukan")
+        dok_lahir_id = m_dok_anak.group(1)
+        s, url, hdr_dok, data_dok = req_bytes(admin, f"/dokumen/{dok_lahir_id}")
+        must(data_dok == JPG_AKTA_LAHIR,
+             "admin mengunduh akta kelahiran anak: byte utuh")
+        # Dokumen anak kedua (baptis) diunggah lalu DIHAPUS.
+        s, url, page = req_multipart(
+            admin, f"/admin/keluarga/{fid}/anak/{cid_satu}/dokumen",
+            {"jenis": "baptis_anak"},
+            {"dokumen": ("Baptis Satu.png", PNG_BAPTIS, "image/png")})
+        kandidat = re.findall(
+            rf"/admin/keluarga/{fid}/anak/{cid_satu}/dokumen/(\d+)/hapus", page)
+        dok_baptis_id = [k for k in kandidat if k != dok_lahir_id][0]
+        s, url, page = req(
+            admin, f"/admin/keluarga/{fid}/anak/{cid_satu}/dokumen/{dok_baptis_id}/hapus",
+            {})
+        must("Baptis Satu.png" not in page,
+             "dokumen baptis anak terhapus dari halaman keluarga")
+        must(status_saja(admin, f"/dokumen/{dok_baptis_id}") == 404,
+             "dokumen yang dihapus tidak bisa diunduh lagi")
+        # GANTI akta nikah: berkas lama hilang dari disk, byte baru terunduh.
+        nama_dok_lama = dok_tersimpan[0]
+        s, url, page = req_multipart(
+            admin, f"/admin/keluarga/{fid}/dokumen", {"jenis": "akta_nikah"},
+            {"dokumen": ("Akta Nikah Baru.pdf", PDF_AKTA_BARU, "application/pdf")})
+        must("Akta Nikah Baru.pdf" in page and "Akta Nikah Budi.pdf" not in page,
+             "akta nikah diganti: nama berkas baru tampil, lama hilang")
+        must(nama_dok_lama not in os.listdir(unggahan),
+             "berkas dokumen lama terhapus dari folder unggahan")
+        s, url, hdr_dok, data_dok = req_bytes(admin, f"/dokumen/{dok_akta_id}")
+        must(data_dok == PDF_AKTA_BARU,
+             "unduh akta setelah diganti: byte berkas BARU")
+
+        # 13C. Login jemaat: aktivasi oleh admin, penjagaan sesi terpisah.
+        jemaat = client()
+        s, url, page = req(jemaat, "/login-jemaat",
+                           {"nik": NIK_KEPALA, "password": "apapun123"})
+        must("belum diaktifkan" in page,
+             "login jemaat sebelum password diatur -> pesan 'belum diaktifkan'")
+        fields_edit = {"kepala_nama": "Budi Uji Santoso", "kepala_nik": NIK_KEPALA,
+                       "pasangan_nama": "Sari Uji Rahayu", "pasangan_nik": NIK_PASANGAN,
+                       "status": "Menikah", "tanggal_menikah": TGL_ISO,
+                       "kata_sandi": "jemaat123"}
+        s, url, page = req_multipart(admin, f"/admin/keluarga/{fid}/edit",
+                                     fields_edit, {})
+        must("AKTIF" in page, "admin mengatur password -> status login jemaat AKTIF")
+        s, url, dash = req(admin, "/admin")
+        must("Login jemaat aktif" in dash and "Dokumen: 2" in dash,
+             "dashboard: lencana 'Login jemaat aktif' + 'Dokumen: 2' tampil")
+        s, url, page = req(jemaat, "/login-jemaat",
+                           {"nik": NIK_KEPALA, "password": "salah total"})
+        must("NIK atau password salah" in page,
+             "login jemaat password salah -> pesan ramah")
+        s, url, page = req(jemaat, "/login-jemaat",
+                           {"nik": NIK_KEPALA, "password": "jemaat123"})
+        must("/jemaat" in url and "Budi Uji Santoso" in page
+             and "Dokumen Saya" in page,
+             "login jemaat berhasil -> Beranda Jemaat + Dokumen Saya")
+        must("Akta Nikah Baru.pdf" in page and "Akta Lahir Satu.jpg" in page,
+             "halaman jemaat: kedua dokumen keluarga tampil")
+        must('class="sidebar"' in page,
+             "halaman jemaat memakai kerangka aplikasi yang sama")
+        s, url, hdr_dok, data_dok = req_bytes(jemaat, f"/dokumen/{dok_akta_id}")
+        must(data_dok == PDF_AKTA_BARU,
+             "jemaat mengunduh dokumennya sendiri: byte utuh")
+        # Keluarga LAIN + dokumennya: jemaat pertama TIDAK boleh mengunduh.
+        fields2 = {"kepala_nama": "Dedi Uji Lain", "kepala_nik": "3201010101800099",
+                   "pasangan_nama": "", "pasangan_nik": "", "status": "Menikah",
+                   "tanggal_menikah": ""}
+        s, url, page = req_multipart(admin, "/admin/keluarga/baru", fields2, {})
+        m2 = re.search(r"/admin/keluarga/(\d+)", url)
+        fid2 = m2.group(1)
+        s, url, page = req_multipart(
+            admin, f"/admin/keluarga/{fid2}/dokumen", {"jenis": "akta_nikah"},
+            {"dokumen": ("Akta Lain.pdf", PDF_AKTA, "application/pdf")})
+        m_dok2 = re.search(r'href="/dokumen/(\d+)"', page)
+        dok_lain_id = m_dok2.group(1)
+        must(status_saja(jemaat, f"/dokumen/{dok_lain_id}") == 404,
+             "jemaat mengunduh dokumen keluarga LAIN -> 404")
+        s, url, page = req(jemaat, "/admin")
+        must("/login" in url and "Dashboard Admin" not in page,
+             "sesi jemaat TIDAK bisa masuk area admin (diarahkan ke login)")
+        # Ganti password jemaat: lama -> baru; keluar; lama gagal, baru bisa.
+        s, url, page = req(jemaat, "/jemaat/ganti-password",
+                           {"password_lama": "jemaat123",
+                            "password_baru": "jemaat456"})
+        must("Password berhasil diganti" in page, "jemaat mengganti password")
+        s, url, page = req(jemaat, "/keluar")
+        s, url, page = req(jemaat, "/jemaat")
+        must("Dokumen Saya" not in page,
+             "setelah keluar: halaman jemaat tidak bisa dibuka lagi")
+        s, url, page = req(jemaat, "/login-jemaat",
+                           {"nik": NIK_KEPALA, "password": "jemaat123"})
+        must("NIK atau password salah" in page,
+             "password lama jemaat tidak berlaku lagi")
+        s, url, page = req(jemaat, "/login-jemaat",
+                           {"nik": NIK_KEPALA, "password": "jemaat456"})
+        must("/jemaat" in url, "login jemaat dengan password baru berhasil")
+
+        # 13D. Logo gereja dari Pengaturan tampil di halaman publik.
+        s, url, page = req_multipart(admin, "/admin/pengaturan/logo", {},
+                                     {"gambar": ("logo.png", PNG_1PX, "image/png")})
+        s, url, home_logo = req(publik, "/")
+        m_logo = re.search(r'class="logo-img besar" src="/foto/([a-f0-9]+\.png)"',
+                           home_logo)
+        must(m_logo is not None, "logo tampil di halaman publik (brand di atas kartu cari)")
+        r = publik.open(BASE + "/foto/" + m_logo.group(1))
+        must(r.status == 200 and r.read() == PNG_1PX,
+             "berkas logo tersaji utuh lewat /foto/ (daftar putih)")
+        req(admin, "/admin/pengaturan/logo-hapus", {})
+        s, url, home_tanpa_logo = req(publik, "/")
+        must("logo-img" not in home_tanpa_logo,
+             "setelah logo dihapus: halaman publik kembali ke tanda bawaan")
+
         # 14. Backup & Pulihkan: halaman khusus admin, unduh ZIP lengkap,
         # dan penolakan berkas yang salah (data tidak berubah).
         s, url, _ = req(publik, "/admin/backup")
@@ -316,6 +510,10 @@ def main():
         foto_zip = "uploads/" + m_foto.group(1)
         must(foto_zip in names and zf.read(foto_zip) == PNG_1PX,
              "zip backup berisi foto keluarga di uploads/ (utuh)")
+        dok_zip = [n for n in names if n.startswith("uploads/dok-")]
+        isi_dok_zip = {zf.read(n) for n in dok_zip}
+        must(PDF_AKTA_BARU in isi_dok_zip and JPG_AKTA_LAHIR in isi_dok_zip,
+             "zip backup berisi berkas DOKUMEN keluarga di uploads/ (utuh)")
         # Pulihkan berkas BUKAN zip -> ditolak, data tidak berubah.
         s, url, page = req_multipart(
             admin, "/admin/backup/pulihkan", {},
@@ -387,6 +585,9 @@ def main():
             s, url, kartu_pulih = req(publik, "/?" + q)
             must("Budi Uji Santoso" in kartu_pulih and "Anak Uji Satu" in kartu_pulih,
                  "setelah pulihkan: pencarian NIK publik menemukan kartu keluarga lagi")
+            s, url, hdr_dok, data_dok = req_bytes(admin2, f"/dokumen/{dok_akta_id}")
+            must(data_dok == PDF_AKTA_BARU,
+                 "setelah pulihkan: dokumen akta nikah ikut kembali & bisa diunduh")
             must(os.path.isfile(os.path.join(tmp2, "sub", "jemaat-sebelum-pulih.db")),
                  "salinan pengaman jemaat-sebelum-pulih.db tersimpan di samping DB aktif")
         finally:

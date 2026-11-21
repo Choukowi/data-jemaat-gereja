@@ -18,8 +18,14 @@ Dua sisi aplikasi:
         Pengaman ini SENGAJA: detail lengkap + foto hanya bisa dibuka
         dengan NIK yang tepat.
 2. ADMIN (satu akun admin, wajib login): mengelola data keluarga & anak,
-   mengunggah foto, mengatur nama gereja, serta banner & wallpaper
-   halaman publik.
+   mengunggah foto dan dokumen resmi (akta nikah, akta kelahiran, surat
+   baptis), mengatur nama gereja, logo, banner & wallpaper halaman
+   publik, serta mengaktifkan login jemaat per keluarga.
+3. JEMAAT (login anggota, diaktifkan admin per keluarga): masuk dari
+   formulir "Login Jemaat" di halaman publik dengan NIK kepala keluarga
+   + password. Jemaat melihat kartu keluarganya sendiri dan dapat
+   mengunduh dokumen keluarganya (lewat /dokumen/<id> yang terlindungi;
+   dokumen TIDAK pernah tersaji lewat route foto publik).
 
 Jalankan:  python3 app.py            (default http://127.0.0.1:8000)
            PORT=8080 python3 app.py
@@ -52,6 +58,25 @@ MAX_FOTO_BYTES = 5 * 1024 * 1024          # ~5 MB per foto
 MAX_BODY_BYTES = 12 * 1024 * 1024         # batas total satu request multipart
 MAX_BACKUP_BYTES = 200 * 1024 * 1024      # berkas backup boleh besar (banyak foto)
 FOTO_NAME_RE = re.compile(r"[a-f0-9]{24}\.(?:jpg|jpeg|png|webp)")
+
+# Dokumen keluarga (akta nikah, akta kelahiran, surat baptis). Berkasnya
+# disimpan di folder uploads yang sama dengan foto, tetapi nama simpannya
+# berpawalan "dok-" sehingga route publik /foto/ TIDAK pernah menyajikannya
+# (dokumen hanya bisa diunduh lewat /dokumen/<id> setelah login).
+DOK_EXT = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
+MAX_DOK_BYTES = 10 * 1024 * 1024          # ~10 MB per berkas dokumen
+MAX_DOK_BODY_BYTES = 16 * 1024 * 1024     # batas request unggah dokumen
+DOK_NAME_RE = re.compile(r"dok-[a-f0-9]{24}\.(?:pdf|jpg|jpeg|png|webp)")
+DOK_KELUARGA = {
+    "akta_nikah": "Akta Nikah",
+    "baptis_kepala": "Surat Baptis Kepala Keluarga",
+    "baptis_pasangan": "Surat Baptis Pasangan",
+}
+DOK_ANAK = {
+    "akta_lahir": "Akta Kelahiran",
+    "baptis_anak": "Surat Baptis Anak",
+}
+DOK_LABEL = {**DOK_KELUARGA, **DOK_ANAK}
 BULAN_ID = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
             "Agustus", "September", "Oktober", "November", "Desember"]
 
@@ -79,7 +104,9 @@ CREATE TABLE IF NOT EXISTS families (
     status TEXT NOT NULL DEFAULT 'Menikah'
         CHECK (status IN ('Menikah','Belum Menikah','Cerai Hidup','Cerai Mati')),
     tanggal_menikah TEXT,                   -- YYYY-MM-DD, boleh kosong
-    foto_nikah TEXT                         -- nama berkas foto di folder uploads, boleh kosong
+    foto_nikah TEXT,                        -- nama berkas foto di folder uploads, boleh kosong
+    kata_sandi_hash TEXT,                   -- password LOGIN JEMAAT; NULL = login jemaat nonaktif
+    kata_sandi_salt TEXT
 );
 CREATE TABLE IF NOT EXISTS children (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +114,16 @@ CREATE TABLE IF NOT EXISTS children (
     nama TEXT NOT NULL,
     foto TEXT,                              -- nama berkas foto anak, boleh kosong
     urutan INTEGER NOT NULL DEFAULT 0       -- urutan tampil (Anak 1, 2, 3, ...)
+);
+CREATE TABLE IF NOT EXISTS dokumen (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    child_id INTEGER REFERENCES children(id) ON DELETE CASCADE,
+    jenis TEXT NOT NULL,                    -- akta_nikah/baptis_kepala/baptis_pasangan (keluarga)
+                                            -- atau akta_lahir/baptis_anak (per anak)
+    stored_name TEXT UNIQUE NOT NULL,       -- nama berkas token "dok-..." di folder uploads
+    original_name TEXT NOT NULL,            -- nama berkas asli dari pengunggah
+    dibuat TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -126,6 +163,13 @@ def init_db():
     os.makedirs(UPLOADS_DIR, exist_ok=True)
     conn = db()
     conn.executescript(SCHEMA)
+    # Migrasi ringan untuk database lama: kolom password login jemaat.
+    kolom = {r[1] for r in conn.execute("PRAGMA table_info(families)")}
+    if "kata_sandi_hash" not in kolom:
+        conn.execute("ALTER TABLE families ADD COLUMN kata_sandi_hash TEXT")
+    if "kata_sandi_salt" not in kolom:
+        conn.execute("ALTER TABLE families ADD COLUMN kata_sandi_salt TEXT")
+    conn.commit()
     row = conn.execute("SELECT COUNT(*) c FROM users").fetchone()
     if row["c"] == 0:
         # Akun admin AWAL khusus pengujian lokal. WAJIB diganti sebelum produksi.
@@ -143,8 +187,12 @@ def init_db():
 
 # ---------------------------------------------------------------------------
 # Session login (server-side, cookie hanya menyimpan token acak)
+# Dua tipe sesi yang TERPISAH JELAS:
+#   {"tipe": "admin",  "user_id": ...}   -> lolos penjaga admin
+#   {"tipe": "jemaat", "family_id": ...} -> hanya untuk halaman jemaat;
+#                                           TIDAK PERNAH lolos penjaga admin
 # ---------------------------------------------------------------------------
-LOGIN_SESSIONS = {}  # token -> user_id
+LOGIN_SESSIONS = {}  # token -> dict sesi
 
 
 def esc(v):
@@ -204,53 +252,182 @@ def save_upload(files, field):
 
 
 def delete_upload(name):
-    if name and FOTO_NAME_RE.fullmatch(name):
+    """Hapus berkas unggahan (foto ATAU dokumen) dari folder uploads.
+    Hanya nama berpola token yang dikenal yang disentuh."""
+    if name and (FOTO_NAME_RE.fullmatch(name) or DOK_NAME_RE.fullmatch(name)):
         try:
             os.remove(os.path.join(UPLOADS_DIR, name))
         except OSError:
             pass
 
 
+def save_dokumen(files, field):
+    """Simpan satu berkas dokumen dari form multipart.
+    Kembalikan (nama_simpan, nama_asli, pesan_error). Nama simpan berpola
+    "dok-<token acak><ekstensi>" — pola ini ditolak route /foto/, jadi
+    dokumen TIDAK bisa diakses publik; hanya lewat /dokumen/<id>."""
+    if field not in files:
+        return None, "", ""
+    fname, data = files[field]
+    if not fname:
+        return None, "", ""
+    ext = os.path.splitext(fname)[1].lower()
+    if ext not in DOK_EXT:
+        return None, "", "Format dokumen harus PDF, JPG, JPEG, PNG, atau WebP."
+    if not data:
+        return None, "", "Berkas dokumen kosong."
+    if len(data) > MAX_DOK_BYTES:
+        return None, "", "Ukuran dokumen melebihi 10 MB."
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    new_name = "dok-" + secrets.token_hex(12) + ext
+    with open(os.path.join(UPLOADS_DIR, new_name), "wb") as fh:
+        fh.write(data)
+    return new_name, os.path.basename(fname), ""
+
+
 # ---------------------------------------------------------------------------
-# HTML layout
+# HTML layout — kerangka aplikasi modern (sidebar desktop + bilah atas &
+# navigasi bawah di HP), palet ungu tua + aksen emas. Varian:
+#   publik=True  -> halaman publik minimal (tanpa nav/header/footer;
+#                   nama gereja hanya di <title>)
+#   user=...     -> kerangka ADMIN (sidebar/bottom-nav admin)
+#   member=...   -> kerangka JEMAAT (sidebar/bottom-nav jemaat)
+#   tanpa keduanya (mis. halaman /login) -> kartu tengah polos bermerek
 # ---------------------------------------------------------------------------
-def layout(user, church, title, body, flash="", bg=None, publik=False, extra_script=""):
-    # bg: nama berkas wallpaper (dari Pengaturan) untuk latar halaman publik.
-    # Bila kosong, halaman memakai latar polos bawaan dari style.css.
-    # publik=True: tampilan halaman publik yang sangat minimal — tanpa header
-    # (nama gereja hanya di <title>), tanpa nav, tanpa footer.
-    # extra_script: skrip tambahan yang disisipkan persis sebelum </body>
-    # (dipakai halaman publik hasil pencarian untuk history.replaceState).
+def _situs():
+    """Pengaturan tampilan situs dari Pengaturan: (wallpaper, logo)."""
+    conn = db()
+    wp = get_setting(conn, "wallpaper_foto", "")
+    logo = get_setting(conn, "logo", "")
+    conn.close()
+    return wp, logo
+
+
+def logo_html(logo, css_class="logo-img"):
+    """Logo gereja dari Pengaturan; bila belum diatur, tanda bawaan
+    (salib dalam lingkaran emas) dengan warna palet."""
+    if logo:
+        return f'<img class="{css_class}" src="/foto/{esc(logo)}" alt="Logo gereja">'
+    return ('<span class="logo-mark" aria-hidden="true">'
+            '<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" '
+            'd="M11 2h2v6.5h6.5v2H13V22h-2V10.5H4.5v-2H11z"/></svg></span>')
+
+
+_IKON = {
+    "beranda": '<path d="M3 11l9-7 9 7"/><path d="M5 9.5V21h14V9.5"/><path d="M9.5 21v-6h5v6"/>',
+    "tambah": '<path d="M12 5v14M5 12h14"/>',
+    "keluarga": ('<circle cx="9" cy="8" r="3.5"/><path d="M3.5 20c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/>'
+                 '<circle cx="17" cy="9" r="2.6"/><path d="M15.6 15.2c2.3.3 4.2 1.9 4.8 4.8"/>'),
+    "atur": ('<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/>'
+             '<circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/>'),
+    "backup": '<path d="M12 3v11"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/>',
+    "globe": ('<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/>'
+              '<path d="M12 3c2.5 2.6 3.8 5.7 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/>'),
+    "dokumen": '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/>',
+    "kunci": '<circle cx="8" cy="15" r="4.5"/><path d="M11.5 11.5 20 3"/><path d="M16 7l3 3"/>',
+    "keluar": '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
+}
+
+
+def ikon(nama):
+    return (f'<svg class="ikon" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+            f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+            f'{_IKON.get(nama, "")}</svg>')
+
+
+def _tautan_nav(item, aktif):
+    kunci, href, label, nama_ikon = item
+    cls = ' class="aktif"' if kunci == aktif else ""
+    return f'<a href="{href}"{cls}>{ikon(nama_ikon)}<span>{esc(label)}</span></a>'
+
+
+def layout(user, church, title, body, flash="", bg=None, publik=False,
+           extra_script="", member=None, aktif=""):
+    # bg: nama berkas wallpaper (dari Pengaturan) untuk latar halaman.
+    # Bila tidak diberikan, diambil dari Pengaturan — wallpaper berlaku
+    # di semua halaman. extra_script: skrip tambahan persis sebelum
+    # </body> (dipakai halaman publik hasil pencarian untuk replaceState).
+    wallpaper, logo = _situs()
+    latar = bg if bg is not None else wallpaper
     bg_style = ""
-    if bg:
-        bg_style = (f"<style>body{{background-image:url('/foto/{esc(bg)}');"
+    if latar:
+        bg_style = (f"<style>body{{background-image:url('/foto/{esc(latar)}');"
                     "background-size:cover;background-position:center;"
                     "background-attachment:fixed;}</style>")
     flash_html = f'<div class="flash">{esc(flash)}</div>' if flash else ""
     if publik:
-        header_html = ""
-        footer_html = ""
-    else:
-        nav = ""
+        # Halaman publik tetap sangat minimal: tanpa nav, tanpa header,
+        # tanpa footer; nama gereja hanya di <title>.
+        kerangka_buka = '<main class="publik-main">'
+        kerangka_tutup = "</main>"
+        return f"""<!DOCTYPE html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{esc(title)} - {esc(church)}</title>
+<link rel="stylesheet" href="/static/style.css">{bg_style}</head>
+<body class="publik">{kerangka_buka}{flash_html}{body}{kerangka_tutup}
+<script src="/static/app.js"></script>{extra_script}
+</body></html>"""
+    if user or member:
         if user:
-            nav = ('<a href="/admin">Dashboard</a><a href="/admin/keluarga/baru">Tambah Keluarga</a>'
-                   '<a href="/admin/pengaturan">Pengaturan</a><a href="/admin/backup">Backup &amp; Pulihkan</a>'
-                   '<a href="/">Lihat Halaman Publik</a>'
-                   '<a href="/logout">Keluar</a>')
+            nama_tampil = user["nama"]
+            peran = "Admin Gereja"
+            awal = (user["nama"] or "A").strip()[:1].upper()
+            item_samping = [
+                ("dashboard", "/admin", "Dashboard", "beranda"),
+                ("tambah", "/admin/keluarga/baru", "Tambah Keluarga", "tambah"),
+                ("pengaturan", "/admin/pengaturan", "Pengaturan", "atur"),
+                ("backup", "/admin/backup", "Backup & Pulihkan", "backup"),
+                ("publik", "/", "Halaman Publik", "globe"),
+                ("keluar", "/keluar", "Keluar", "keluar"),
+            ]
+            item_bawah = [item_samping[0], item_samping[1], item_samping[2],
+                          item_samping[3], item_samping[5]]
         else:
-            nav = '<a href="/">Cari Data Keluarga</a><a href="/login">Masuk Admin</a>'
-        user_html = (f'<div class="userbar">Masuk sebagai {esc(user["nama"])}</div>') if user else ""
-        header_html = f"<header><h1>{esc(church)}</h1>{user_html}<nav>{nav}</nav></header>"
-        footer_html = ("<footer><small>Direktori Keluarga Jemaat &bull; Detail lengkap "
-                       "hanya tampil dengan NIK yang tepat</small></footer>")
+            nama_tampil = "Keluarga " + member["kepala_nama"]
+            peran = "Jemaat"
+            awal = (member["kepala_nama"] or "J").strip()[:1].upper()
+            item_samping = [
+                ("beranda", "/jemaat", "Beranda Jemaat", "beranda"),
+                ("dokumen", "/jemaat#dokumen", "Dokumen Saya", "dokumen"),
+                ("password", "/jemaat#ganti-password", "Ganti Password", "kunci"),
+                ("publik", "/", "Halaman Publik", "globe"),
+                ("keluar", "/keluar", "Keluar", "keluar"),
+            ]
+            item_bawah = [item_samping[0], item_samping[1], item_samping[2],
+                          item_samping[4]]
+        samping = "".join(_tautan_nav(it, aktif) for it in item_samping)
+        bawah = "".join(_tautan_nav(it, aktif) for it in item_bawah)
+        kerangka = f"""<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">{logo_html(logo)}<div class="brand-teks"><b>{esc(church)}</b><small>Data Jemaat Gereja</small></div></div>
+    <nav class="side-nav">{samping}</nav>
+    <div class="side-user"><span class="avatar">{esc(awal)}</span><div><b>{esc(nama_tampil)}</b><small>{esc(peran)}</small></div></div>
+  </aside>
+  <div class="shell-main">
+    <div class="topbar">{logo_html(logo, "logo-img kecil")}<b>{esc(church)}</b><span class="top-user">{esc(nama_tampil)}</span></div>
+    <main>{flash_html}{body}</main>
+    <footer class="kaki"><small>Direktori Keluarga Jemaat &bull; Detail lengkap hanya tampil dengan NIK yang tepat</small></footer>
+  </div>
+</div>
+<nav class="bottom-nav">{bawah}</nav>"""
+        return f"""<!DOCTYPE html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{esc(title)} - {esc(church)}</title>
+<link rel="stylesheet" href="/static/style.css">{bg_style}</head>
+<body>{kerangka}
+<script src="/static/app.js"></script>{extra_script}
+</body></html>"""
+    # Tanpa sesi (halaman masuk & galat): kartu tengah polos bermerek.
     return f"""<!DOCTYPE html>
 <html lang="id"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)} - {esc(church)}</title>
 <link rel="stylesheet" href="/static/style.css">{bg_style}</head>
-<body>{header_html}
-<main>{flash_html}{body}</main>
-{footer_html}
+<body class="polos"><main class="polos-main">
+<div class="brand-center">{logo_html(logo, "logo-img besar")}<div class="brand-nama-besar">{esc(church)}</div></div>
+{flash_html}{body}</main>
 <script src="/static/app.js"></script>{extra_script}
 </body></html>"""
 
@@ -293,16 +470,33 @@ class Handler(BaseHTTPRequestHandler):
         headers.append(("Location", path))
         self.send_html("", status=303, extra_headers=headers)
 
-    def current_user(self):
+    def _sesi(self):
         cookie = SimpleCookie(self.headers.get("Cookie", ""))
         morsel = cookie.get("jemaat_session")
         if not morsel:
             return None
-        uid = LOGIN_SESSIONS.get(morsel.value)
-        if not uid:
+        return LOGIN_SESSIONS.get(morsel.value)
+
+    def current_user(self):
+        """Baris users bila sesi ini sesi ADMIN; selain itu None.
+        Sesi jemaat TIDAK PERNAH dianggap admin."""
+        sesi = self._sesi()
+        if not sesi or sesi.get("tipe") != "admin":
             return None
         conn = db()
-        row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE id=?",
+                           (sesi.get("user_id"),)).fetchone()
+        conn.close()
+        return row
+
+    def current_member(self):
+        """Baris families bila sesi ini sesi JEMAAT; selain itu None."""
+        sesi = self._sesi()
+        if not sesi or sesi.get("tipe") != "jemaat":
+            return None
+        conn = db()
+        row = conn.execute("SELECT * FROM families WHERE id=?",
+                           (sesi.get("family_id"),)).fetchone()
         conn.close()
         return row
 
@@ -328,7 +522,7 @@ class Handler(BaseHTTPRequestHandler):
         boundary = m.group(1).strip().strip('"')
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length > max_bytes:
-            raise ValueError("Ukuran unggahan terlalu besar (maksimal sekitar 5 MB per foto).")
+            raise ValueError("Ukuran unggahan melebihi batas yang diizinkan.")
         body = self.rfile.read(length) if length else b""
         delim = b"--" + boundary.encode("utf-8")
         fields, files = {}, {}
@@ -402,20 +596,25 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             return self.home(qs, flash)
         if path == "/login":
-            body = """<h2>Masuk Admin</h2>
+            body = """<section class="panel kartu-masuk"><h2>Masuk Admin</h2>
             <form method="post" action="/login">
               <label>Username <input name="username" required autocomplete="username"></label>
               <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
               <button type="submit">Masuk</button></form>
-            <p><small>Akun uji lokal ada di README proyek. Jangan pakai akun awal di produksi.</small></p>"""
+            <p><small>Akun uji lokal ada di README proyek. Jangan pakai akun awal di produksi.</small></p>
+            <p><a href="/">Kembali ke halaman publik</a></p></section>"""
             return self.send_html(layout(None, self.church(), "Masuk", body, flash))
-        if path == "/logout":
+        if path in ("/logout", "/keluar"):
             cookie = SimpleCookie(self.headers.get("Cookie", ""))
             morsel = cookie.get("jemaat_session")
             if morsel:
                 LOGIN_SESSIONS.pop(morsel.value, None)
             return self.redirect("/", "Sampai jumpa.",
                                  set_cookie="jemaat_session=; Max-Age=0; Path=/")
+        if path == "/jemaat":
+            return self.jemaat_home(flash)
+        if path.startswith("/dokumen/"):
+            return self.serve_dokumen(path[len("/dokumen/"):])
 
         user = self.current_user()
         if not user:
@@ -452,6 +651,10 @@ class Handler(BaseHTTPRequestHandler):
     def route_post(self, path):
         if path == "/login":
             return self.post_login()
+        if path == "/login-jemaat":
+            return self.post_login_jemaat()
+        if path == "/jemaat/ganti-password":
+            return self.post_jemaat_ganti_password()
         user = self.current_user()
         if not user:
             return self.redirect("/login", "Silakan masuk dulu.")
@@ -463,6 +666,19 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.redirect("/admin/backup", str(e))
             return self.post_backup_pulihkan(user, files)
+        if path.startswith("/admin/keluarga/") and "/dokumen" in path:
+            # Unggahan dokumen boleh sampai ~10 MB: batas request khusus.
+            parts = path.split("/")
+            try:
+                fid_dok = int(parts[3])
+                tujuan = f"/admin/keluarga/{fid_dok}"
+            except (IndexError, ValueError):
+                tujuan = "/admin"
+            try:
+                f_dok, files_dok = self.parse_multipart(MAX_DOK_BODY_BYTES)
+            except ValueError as e:
+                return self.redirect(tujuan, str(e))
+            return self.dispatch_dokumen(user, path, f_dok, files_dok)
         f, files = self.read_form()
         if path == "/admin/pengaturan":
             return self.post_pengaturan(user, f)
@@ -474,6 +690,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.post_gambar_situs(user, "wallpaper_foto", files, "Wallpaper")
         if path == "/admin/pengaturan/wallpaper-hapus":
             return self.post_gambar_situs_hapus(user, "wallpaper_foto", "Wallpaper")
+        if path == "/admin/pengaturan/logo":
+            return self.post_gambar_situs(user, "logo", files, "Logo")
+        if path == "/admin/pengaturan/logo-hapus":
+            return self.post_gambar_situs_hapus(user, "logo", "Logo")
         if path == "/ganti-password":
             return self.post_ganti_password(user, f)
         if path == "/admin/keluarga/baru":
@@ -513,9 +733,23 @@ class Handler(BaseHTTPRequestHandler):
     # -- berkas foto ----------------------------------------------------------
     def serve_foto(self, raw_name):
         """Foto hanya disajikan lewat route ini, dengan nama berkas token acak.
-        Tidak ada directory listing; nama di luar pola token ditolak."""
+        Tidak ada directory listing; nama di luar pola token ditolak.
+        DAFTAR PUTIH: nama juga harus tercatat sebagai foto sungguhan —
+        foto nikah keluarga, foto anak, atau banner/wallpaper/logo situs.
+        Berkas dokumen (pola "dok-...") tidak pernah lolos route ini."""
         name = urllib.parse.unquote(raw_name)
         if not FOTO_NAME_RE.fullmatch(name):
+            return self.send_html("Tidak ditemukan.", status=404)
+        conn = db()
+        tercatat = conn.execute(
+            """SELECT 1 WHERE EXISTS(SELECT 1 FROM families WHERE foto_nikah=?)
+               OR EXISTS(SELECT 1 FROM children WHERE foto=?)
+               OR EXISTS(SELECT 1 FROM settings
+                         WHERE key IN ('banner_foto','wallpaper_foto','logo')
+                           AND value=?)""",
+            (name, name, name)).fetchone()
+        conn.close()
+        if not tercatat:
             return self.send_html("Tidak ditemukan.", status=404)
         fpath = os.path.join(UPLOADS_DIR, name)
         if not os.path.isfile(fpath):
@@ -541,7 +775,7 @@ class Handler(BaseHTTPRequestHandler):
         conn.close()
         if row and verify_password(f.get("password", ""), row["password_hash"], row["salt"]):
             token = secrets.token_urlsafe(32)
-            LOGIN_SESSIONS[token] = row["id"]
+            LOGIN_SESSIONS[token] = {"tipe": "admin", "user_id": row["id"]}
             return self.redirect("/admin", f"Selamat datang, {row['nama']}.",
                                  set_cookie=f"jemaat_session={token}; HttpOnly; Path=/; SameSite=Lax")
         return self.redirect("/login", "Username atau password salah.")
@@ -607,14 +841,27 @@ class Handler(BaseHTTPRequestHandler):
             skrip_refresh = "<script>history.replaceState(null, '', '/');</script>"
         banner = get_setting(conn, "banner_foto", "")
         wallpaper = get_setting(conn, "wallpaper_foto", "")
+        logo = get_setting(conn, "logo", "")
         conn.close()
         banner_html = (f'<img class="banner" src="/foto/{esc(banner)}" '
                        f'alt="Banner">' if banner else "")
-        body = f"""{banner_html}<h2>Cari Keluarga (Nama/NIK)</h2>
+        brand_html = f'<div class="brand-publik">{logo_html(logo, "logo-img besar")}</div>'
+        login_jemaat = """<section class="panel kartu-login-jemaat"><h3>Login Jemaat</h3>
+        <p><small>Masuk dengan NIK kepala keluarga untuk melihat data keluarga
+        &amp; mengunduh dokumen Anda.</small></p>
+        <form method="post" action="/login-jemaat">
+          <label>NIK Kepala Keluarga <input name="nik" inputmode="numeric"
+            maxlength="16" required autocomplete="username"></label>
+          <label>Password <input name="password" type="password" required
+            autocomplete="current-password"></label>
+          <button type="submit">Masuk</button></form></section>"""
+        body = f"""{banner_html}{brand_html}
+        <section class="panel kartu-cari"><h2>Cari Keluarga (Nama/NIK)</h2>
         <form method="get" action="/">
           <input name="q" autocomplete="off">
-          <button type="submit">Cari</button></form>
-        {hasil}"""
+          <button type="submit">Cari</button></form></section>
+        {hasil}
+        {login_jemaat}"""
         return self.send_html(layout(None, church, "Cari Keluarga (Nama/NIK)", body, flash,
                                      bg=wallpaper or None, publik=True,
                                      extra_script=skrip_refresh))
@@ -645,16 +892,244 @@ class Handler(BaseHTTPRequestHandler):
         {anak_html}</section>"""
 
     # -----------------------------------------------------------------------
+    # JEMAAT: login anggota & halaman keluarga sendiri
+    # -----------------------------------------------------------------------
+    def post_login_jemaat(self):
+        f = self.form()
+        nik = re.sub(r"\D", "", f.get("nik") or "")
+        conn = db()
+        fam = conn.execute("SELECT * FROM families WHERE kepala_nik=?",
+                           (nik,)).fetchone()
+        conn.close()
+        if not fam:
+            return self.redirect("/", "NIK atau password salah.")
+        if not fam["kata_sandi_hash"]:
+            return self.redirect(
+                "/", "Login jemaat untuk keluarga ini belum diaktifkan. "
+                     "Hubungi admin gereja.")
+        if verify_password(f.get("password", ""), fam["kata_sandi_hash"],
+                           fam["kata_sandi_salt"]):
+            token = secrets.token_urlsafe(32)
+            LOGIN_SESSIONS[token] = {"tipe": "jemaat", "family_id": fam["id"]}
+            return self.redirect(
+                "/jemaat", f"Selamat datang, keluarga {fam['kepala_nama']}.",
+                set_cookie=f"jemaat_session={token}; HttpOnly; Path=/; SameSite=Lax")
+        return self.redirect("/", "NIK atau password salah.")
+
+    def jemaat_home(self, flash):
+        member = self.current_member()
+        if not member:
+            if self.current_user():
+                return self.redirect("/admin")
+            return self.redirect("/", "Silakan masuk dengan NIK & password dulu.")
+        conn = db()
+        church = nama_gereja(conn)
+        anak = conn.execute(
+            "SELECT * FROM children WHERE family_id=? ORDER BY urutan, id",
+            (member["id"],)).fetchall()
+        doks = conn.execute(
+            "SELECT d.*, c.nama AS nama_anak FROM dokumen d "
+            "LEFT JOIN children c ON c.id=d.child_id "
+            "WHERE d.family_id=? ORDER BY d.id", (member["id"],)).fetchall()
+        conn.close()
+        if doks:
+            baris = ""
+            for d in doks:
+                untuk = (f"Anak: {esc(d['nama_anak'])}" if d["child_id"]
+                         else "Keluarga")
+                baris += f"""<li><b>{esc(DOK_LABEL.get(d['jenis'], d['jenis']))}</b>
+                &mdash; {untuk}<br><small>{esc(d['original_name'])}</small><br>
+                <a href="/dokumen/{d['id']}"><button type="button">Download</button></a></li>"""
+            dok_html = f'<ul class="dok-list">{baris}</ul>'
+        else:
+            dok_html = ("<p>Belum ada dokumen yang diunggah admin untuk "
+                        "keluarga ini.</p>")
+        body = f"""<h2>Beranda Jemaat</h2>
+        {self.kartu_keluarga_lengkap(member, anak)}
+        <section class="panel" id="dokumen"><h3>Dokumen Saya</h3>
+        {dok_html}</section>
+        <section class="panel" id="ganti-password"><h3>Ganti Password</h3>
+        <form method="post" action="/jemaat/ganti-password">
+          <label>Password lama <input name="password_lama" type="password"
+            required autocomplete="current-password"></label>
+          <label>Password baru (minimal 8 karakter) <input name="password_baru"
+            type="password" required minlength="8" autocomplete="new-password"></label>
+          <button type="submit">Ganti Password</button></form></section>"""
+        return self.send_html(layout(None, church, "Beranda Jemaat", body, flash,
+                                     member=member, aktif="beranda"))
+
+    def post_jemaat_ganti_password(self):
+        member = self.current_member()
+        if not member:
+            return self.redirect("/", "Silakan masuk dengan NIK & password dulu.")
+        f = self.form()
+        baru = f.get("password_baru") or ""
+        if not verify_password(f.get("password_lama", ""),
+                               member["kata_sandi_hash"], member["kata_sandi_salt"]):
+            return self.redirect("/jemaat", "Password lama salah.")
+        if len(baru) < 8:
+            return self.redirect("/jemaat", "Password baru minimal 8 karakter.")
+        ph, salt = hash_password(baru)
+        conn = db()
+        conn.execute("UPDATE families SET kata_sandi_hash=?, kata_sandi_salt=? "
+                     "WHERE id=?", (ph, salt, member["id"]))
+        conn.commit()
+        conn.close()
+        return self.redirect("/jemaat", "Password berhasil diganti.")
+
+    # -----------------------------------------------------------------------
+    # DOKUMEN: unduh (admin: semua; jemaat: hanya milik keluarganya)
+    # -----------------------------------------------------------------------
+    def serve_dokumen(self, raw_id):
+        try:
+            did = int(raw_id)
+        except (TypeError, ValueError):
+            return self.send_html("Tidak ditemukan.", status=404)
+        conn = db()
+        dok = conn.execute("SELECT * FROM dokumen WHERE id=?", (did,)).fetchone()
+        conn.close()
+        if not dok or not DOK_NAME_RE.fullmatch(dok["stored_name"] or ""):
+            return self.send_html("Tidak ditemukan.", status=404)
+        user = self.current_user()
+        member = self.current_member()
+        boleh = user is not None or (member is not None
+                                     and member["id"] == dok["family_id"])
+        if not boleh:
+            return self.send_html("Tidak ditemukan.", status=404)
+        fpath = os.path.join(UPLOADS_DIR, dok["stored_name"])
+        if not os.path.isfile(fpath):
+            return self.send_html("Tidak ditemukan.", status=404)
+        ext = os.path.splitext(dok["stored_name"])[1].lower()
+        ctype = {".pdf": "application/pdf", ".jpg": "image/jpeg",
+                 ".jpeg": "image/jpeg", ".png": "image/png",
+                 ".webp": "image/webp"}[ext]
+        with open(fpath, "rb") as fh:
+            data = fh.read()
+        nama_asli = (dok["original_name"] or dok["stored_name"]).replace('"', "")
+        nama_asli = nama_asli.replace("\r", "").replace("\n", "")
+        return self.send_bytes(data, ctype, filename=nama_asli)
+
+    def dispatch_dokumen(self, user, path, f, files):
+        """Pengarah POST dokumen dari route_post (sudah lolos penjaga admin
+        dan parser multipart khusus dokumen)."""
+        parts = path.split("/")
+        # /admin/keluarga/<fid>/...
+        try:
+            fid = int(parts[3])
+        except (IndexError, ValueError):
+            return self.not_found(user)
+        sisa = parts[4:]
+        if sisa == ["dokumen"]:
+            return self.post_dokumen_simpan(user, fid, None, f, files)
+        if len(sisa) == 3 and sisa[0] == "dokumen" and sisa[2] == "hapus":
+            try:
+                did = int(sisa[1])
+            except ValueError:
+                return self.not_found(user)
+            return self.post_dokumen_hapus(user, fid, None, did)
+        if len(sisa) >= 2 and sisa[0] == "anak":
+            try:
+                cid = int(sisa[1])
+            except ValueError:
+                return self.not_found(user)
+            if sisa[2:] == ["dokumen"]:
+                return self.post_dokumen_simpan(user, fid, cid, f, files)
+            if len(sisa) == 5 and sisa[2] == "dokumen" and sisa[4] == "hapus":
+                try:
+                    did = int(sisa[3])
+                except ValueError:
+                    return self.not_found(user)
+                return self.post_dokumen_hapus(user, fid, cid, did)
+        return self.not_found(user)
+
+    def post_dokumen_simpan(self, user, fid, cid, f, files):
+        """Unggah/ganti satu dokumen. cid=None -> dokumen tingkat keluarga;
+        cid terisi -> dokumen milik anak itu. Satu slot (jenis) per
+        keluarga/anak: mengunggah ulang menggantikan berkas lama."""
+        back = f"/admin/keluarga/{fid}"
+        jenis = (f.get("jenis") or "").strip()
+        sah = DOK_ANAK if cid is not None else DOK_KELUARGA
+        if jenis not in sah:
+            return self.redirect(back, "Jenis dokumen tidak dikenal.")
+        conn = db()
+        fam = conn.execute("SELECT id FROM families WHERE id=?", (fid,)).fetchone()
+        anak = None
+        if cid is not None:
+            anak = conn.execute(
+                "SELECT id FROM children WHERE id=? AND family_id=?",
+                (cid, fid)).fetchone()
+        if not fam or (cid is not None and not anak):
+            conn.close()
+            return self.not_found(user)
+        stored, original, err = save_dokumen(files, "dokumen")
+        if err:
+            conn.close()
+            return self.redirect(back, err)
+        if not stored:
+            conn.close()
+            return self.redirect(back, "Pilih berkas dokumen dulu.")
+        if cid is not None:
+            lama = conn.execute(
+                "SELECT * FROM dokumen WHERE child_id=? AND jenis=?",
+                (cid, jenis)).fetchone()
+        else:
+            lama = conn.execute(
+                "SELECT * FROM dokumen WHERE family_id=? AND child_id IS NULL "
+                "AND jenis=?", (fid, jenis)).fetchone()
+        dibuat = datetime.datetime.now().isoformat(timespec="seconds")
+        try:
+            if lama:
+                conn.execute(
+                    "UPDATE dokumen SET stored_name=?, original_name=?, dibuat=? "
+                    "WHERE id=?", (stored, original, dibuat, lama["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO dokumen (family_id, child_id, jenis, stored_name, "
+                    "original_name, dibuat) VALUES (?,?,?,?,?,?)",
+                    (fid, cid, jenis, stored, original, dibuat))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            conn.close()
+            delete_upload(stored)
+            return self.redirect(back, "Dokumen gagal disimpan (duplikat).")
+        conn.close()
+        if lama and lama["stored_name"] != stored:
+            delete_upload(lama["stored_name"])
+        return self.redirect(back, f"Dokumen {DOK_LABEL[jenis]} disimpan.")
+
+    def post_dokumen_hapus(self, user, fid, cid, did):
+        back = f"/admin/keluarga/{fid}"
+        conn = db()
+        if cid is not None:
+            dok = conn.execute(
+                "SELECT * FROM dokumen WHERE id=? AND family_id=? AND child_id=?",
+                (did, fid, cid)).fetchone()
+        else:
+            dok = conn.execute(
+                "SELECT * FROM dokumen WHERE id=? AND family_id=? "
+                "AND child_id IS NULL", (did, fid)).fetchone()
+        if not dok:
+            conn.close()
+            return self.not_found(user)
+        conn.execute("DELETE FROM dokumen WHERE id=?", (did,))
+        conn.commit()
+        conn.close()
+        delete_upload(dok["stored_name"])
+        return self.redirect(back, "Dokumen dihapus.")
+
+    # -----------------------------------------------------------------------
     # ADMIN
     # -----------------------------------------------------------------------
     def admin_dashboard(self, user, qs, flash):
         conn = db()
         church = nama_gereja(conn)
         q = (qs.get("q") or [""])[0].strip()
+        kolom_tambahan = (", (SELECT COUNT(*) FROM children c WHERE c.family_id=f.id) jml_anak"
+                          ", (SELECT COUNT(*) FROM dokumen d WHERE d.family_id=f.id) jml_dok")
         if q:
             like = f"%{q}%"
             rows = conn.execute(
-                """SELECT f.*, (SELECT COUNT(*) FROM children c WHERE c.family_id=f.id) jml_anak
+                f"""SELECT f.* {kolom_tambahan}
                    FROM families f
                    WHERE f.kepala_nama LIKE ? OR f.pasangan_nama LIKE ?
                       OR f.kepala_nik LIKE ? OR f.pasangan_nik LIKE ?
@@ -662,15 +1137,22 @@ class Handler(BaseHTTPRequestHandler):
                 (like, like, like, like)).fetchall()
         else:
             rows = conn.execute(
-                """SELECT f.*, (SELECT COUNT(*) FROM children c WHERE c.family_id=f.id) jml_anak
+                f"""SELECT f.* {kolom_tambahan}
                    FROM families f ORDER BY f.kepala_nama LIMIT 100""").fetchall()
         total_keluarga = conn.execute("SELECT COUNT(*) c FROM families").fetchone()["c"]
         total_anak = conn.execute("SELECT COUNT(*) c FROM children").fetchone()["c"]
         conn.close()
+        def lencana(r):
+            b = ""
+            if r["jml_dok"]:
+                b += f' <span class="lencana">Dokumen: {r["jml_dok"]}</span>'
+            if r["kata_sandi_hash"]:
+                b += ' <span class="lencana emas">Login jemaat aktif</span>'
+            return b
         items = "".join(
             f"""<li><a href="/admin/keluarga/{r['id']}"><b>{esc(r['kepala_nama'])}</b></a>
             &mdash; pasangan: {esc(r['pasangan_nama'] or '-')}
-            &mdash; {esc(r['status'])} &mdash; {r['jml_anak']} anak
+            &mdash; {esc(r['status'])} &mdash; {r['jml_anak']} anak{lencana(r)}
             <br><small>NIK kepala: <code>{esc(r['kepala_nik'])}</code></small></li>"""
             for r in rows) or "<li>Belum ada data keluarga.</li>"
         warn = ""
@@ -691,13 +1173,16 @@ class Handler(BaseHTTPRequestHandler):
           <label>Cari keluarga (nama / NIK) <input name="q" value="{esc(q)}" autocomplete="off"></label>
           <button type="submit">Cari</button></form>
         <h3>Daftar Keluarga</h3><ul>{items}</ul>"""
-        return self.send_html(layout(user, church, "Dashboard Admin", body, flash))
+        return self.send_html(layout(user, church, "Dashboard Admin", body, flash,
+                                     aktif="dashboard"))
 
     def admin_keluarga_form(self, user, fid, flash):
         conn = db()
         church = nama_gereja(conn)
         fam = None
         anak = []
+        dok_keluarga = {}
+        dok_anak = {}
         if fid is not None:
             fam = conn.execute("SELECT * FROM families WHERE id=?", (fid,)).fetchone()
             if not fam:
@@ -705,6 +1190,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.not_found(user)
             anak = conn.execute(
                 "SELECT * FROM children WHERE family_id=? ORDER BY urutan, id", (fid,)).fetchall()
+            for d in conn.execute("SELECT * FROM dokumen WHERE family_id=?",
+                                  (fid,)).fetchall():
+                if d["child_id"]:
+                    dok_anak.setdefault(d["child_id"], {})[d["jenis"]] = d
+                else:
+                    dok_keluarga[d["jenis"]] = d
         conn.close()
         v = dict(fam) if fam else {}
         status_opts = "".join(
@@ -718,6 +1209,16 @@ class Handler(BaseHTTPRequestHandler):
         if fam and fam["foto_nikah"]:
             foto_html = f"""<p>Foto pernikahan saat ini:<br>
             <img class="foto-nikah" src="/foto/{esc(fam['foto_nikah'])}" alt="Foto pernikahan"></p>"""
+        if fam and fam["kata_sandi_hash"]:
+            status_login = ('<p><small>Status login jemaat: <b>AKTIF</b> — keluarga '
+                            'ini bisa masuk lewat formulir Login Jemaat di halaman '
+                            'publik dengan NIK kepala keluarga.</small></p>')
+        elif fam:
+            status_login = ('<p><small>Status login jemaat: belum aktif. Isi '
+                            'password di bawah untuk mengaktifkannya.</small></p>')
+        else:
+            status_login = ('<p><small>Isi password bila keluarga ini boleh '
+                            'masuk lewat Login Jemaat; kosongkan bila tidak.</small></p>')
         body = f"""<h2>{esc(judul)}</h2>
         <form method="post" action="{aksi}" enctype="multipart/form-data">
           <label>Nama Kepala Keluarga <input name="kepala_nama" required
@@ -731,11 +1232,39 @@ class Handler(BaseHTTPRequestHandler):
           <label>Status Perkawinan <select name="status">{status_opts}</select></label>
           <label>Tanggal Menikah <input name="tanggal_menikah" type="date"
             value="{esc(v.get('tanggal_menikah', '') or '')}"></label>
+          <label>Password Login Jemaat (isi untuk mengaktifkan / mengganti;
+            kosongkan bila tidak diubah) <input name="kata_sandi" type="password"
+            autocomplete="new-password"></label>
+          {status_login}
           {foto_html}
           <label>Foto Pernikahan (JPG/PNG/WebP, maks 5 MB; kosongkan bila tidak diganti)
             <input name="foto_nikah" type="file" accept=".jpg,.jpeg,.png,.webp"></label>
           <button type="submit">Simpan Keluarga</button></form>"""
         if fam:
+            def slot_dok(jenis, label, dok, url_unggah, url_hapus):
+                """Satu slot dokumen: berkas saat ini + unduh/hapus, atau
+                formulir unggah. Mengunggah pada slot yang sudah terisi
+                berarti mengganti berkasnya."""
+                if dok:
+                    return f"""<div class="dok-slot"><p><b>{esc(label)}</b><br>
+                    <small>Berkas: {esc(dok['original_name'])}</small><br>
+                    <a href="/dokumen/{dok['id']}"><button type="button">Download</button></a></p>
+                    <form method="post" action="{url_unggah}" enctype="multipart/form-data">
+                      <input type="hidden" name="jenis" value="{jenis}">
+                      <label>Ganti berkas (PDF/JPG/PNG/WebP, maks 10 MB)
+                        <input name="dokumen" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" required></label>
+                      <button type="submit">Ganti Dokumen</button></form>
+                    <form method="post" action="{url_hapus}"
+                      onsubmit="return confirm('Hapus dokumen ini?')">
+                      <button type="submit" class="danger">Hapus Dokumen</button></form></div>"""
+                return f"""<div class="dok-slot"><p><b>{esc(label)}</b><br>
+                <small>Belum ada berkas.</small></p>
+                <form method="post" action="{url_unggah}" enctype="multipart/form-data">
+                  <input type="hidden" name="jenis" value="{jenis}">
+                  <label>Unggah berkas (PDF/JPG/PNG/WebP, maks 10 MB)
+                    <input name="dokumen" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" required></label>
+                  <button type="submit">Unggah Dokumen</button></form></div>"""
+
             if fam["foto_nikah"]:
                 body += f"""<form method="post" action="/admin/keluarga/{fid}/foto-hapus"
                   onsubmit="return confirm('Hapus foto pernikahan keluarga ini?')">
@@ -744,15 +1273,31 @@ class Handler(BaseHTTPRequestHandler):
             for i, a in enumerate(anak):
                 img = (f'<img class="foto-anak" src="/foto/{esc(a["foto"])}" alt="">'
                        if a["foto"] else "")
-                rows += f"""<li><span class="anak-label">Anak {i + 1}</span> {img} {esc(a['nama'])}
+                slot_anak = ""
+                for jenis, label in DOK_ANAK.items():
+                    dok = dok_anak.get(a["id"], {}).get(jenis)
+                    url_hapus = (f"/admin/keluarga/{fid}/anak/{a['id']}/dokumen/"
+                                 f"{dok['id']}/hapus" if dok else "")
+                    slot_anak += slot_dok(
+                        jenis, label, dok,
+                        f"/admin/keluarga/{fid}/anak/{a['id']}/dokumen", url_hapus)
+                rows += f"""<li><div><span class="anak-label">Anak {i + 1}</span> {img} {esc(a['nama'])}
                   &mdash; <a href="/admin/anak/{a['id']}/edit">Ubah</a>
                   <form method="post" action="/admin/anak/{a['id']}/naik" class="inline">
                     <button type="submit">Naik</button></form>
                   <form method="post" action="/admin/anak/{a['id']}/turun" class="inline">
                     <button type="submit">Turun</button></form>
                   <form method="post" action="/admin/anak/{a['id']}/hapus" class="inline"
-                    onsubmit="return confirm('Hapus anak ini?')">
-                    <button type="submit" class="danger">Hapus</button></form></li>"""
+                    onsubmit="return confirm('Hapus anak ini beserta dokumennya?')">
+                    <button type="submit" class="danger">Hapus</button></form></div>
+                  <div class="dok-anak">{slot_anak}</div></li>"""
+            slot_keluarga = ""
+            for jenis, label in DOK_KELUARGA.items():
+                dok = dok_keluarga.get(jenis)
+                url_hapus = (f"/admin/keluarga/{fid}/dokumen/{dok['id']}/hapus"
+                             if dok else "")
+                slot_keluarga += slot_dok(
+                    jenis, label, dok, f"/admin/keluarga/{fid}/dokumen", url_hapus)
             body += f"""<section class="panel"><h3>Anak-anak</h3>
             <ul class="anak-list">{rows or '<li>Belum ada anak.</li>'}</ul>
             <h4>Tambah Anak</h4>
@@ -761,10 +1306,15 @@ class Handler(BaseHTTPRequestHandler):
               <label>Foto Anak (boleh kosong) <input name="foto" type="file"
                 accept=".jpg,.jpeg,.png,.webp"></label>
               <button type="submit">Tambah Anak</button></form></section>
+            <section class="panel"><h3>Dokumen Keluarga</h3>
+            <p><small>Dokumen resmi keluarga. Jemaat yang sudah diaktifkan
+            login-nya dapat mengunduh dokumen ini dari halaman jemaatnya.</small></p>
+            {slot_keluarga}</section>
             <form method="post" action="/admin/keluarga/{fid}/hapus"
-              onsubmit="return confirm('Hapus SELURUH data keluarga ini beserta anak-anaknya?')">
+              onsubmit="return confirm('Hapus SELURUH data keluarga ini beserta anak-anak dan dokumennya?')">
               <button type="submit" class="danger">Hapus Keluarga Ini</button></form>"""
-        return self.send_html(layout(user, church, judul, body, flash))
+        return self.send_html(layout(user, church, judul, body, flash,
+                                     aktif="tambah" if not fam else "dashboard"))
 
     def post_keluarga_simpan(self, user, fid, f, files):
         back = f"/admin/keluarga/{fid}" if fid else "/admin/keluarga/baru"
@@ -774,6 +1324,12 @@ class Handler(BaseHTTPRequestHandler):
         pasangan_nik = re.sub(r"\D", "", f.get("pasangan_nik") or "")
         status = f.get("status") or "Menikah"
         tanggal = (f.get("tanggal_menikah") or "").strip() or None
+        kata_sandi = f.get("kata_sandi") or ""
+        if kata_sandi and len(kata_sandi) < 6:
+            return self.redirect(back, "Password login jemaat minimal 6 karakter.")
+        ks_hash = ks_salt = None
+        if kata_sandi:
+            ks_hash, ks_salt = hash_password(kata_sandi)
         if not kepala_nama:
             return self.redirect(back, "Nama kepala keluarga wajib diisi.")
         if not valid_nik(kepala_nik):
@@ -799,10 +1355,11 @@ class Handler(BaseHTTPRequestHandler):
             if fid is None:
                 cur = conn.execute(
                     """INSERT INTO families (kepala_nama, kepala_nik, pasangan_nama,
-                       pasangan_nik, status, tanggal_menikah, foto_nikah)
-                       VALUES (?,?,?,?,?,?,?)""",
+                       pasangan_nik, status, tanggal_menikah, foto_nikah,
+                       kata_sandi_hash, kata_sandi_salt)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
                     (kepala_nama, kepala_nik, pasangan_nama, pasangan_nik or None,
-                     status, tanggal, foto_baru))
+                     status, tanggal, foto_baru, ks_hash, ks_salt))
                 conn.commit()
                 fid_baru = cur.lastrowid
                 conn.close()
@@ -813,11 +1370,19 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
                 return self.not_found(user)
             foto_final = foto_baru if foto_baru else lama["foto_nikah"]
-            conn.execute(
-                """UPDATE families SET kepala_nama=?, kepala_nik=?, pasangan_nama=?,
-                   pasangan_nik=?, status=?, tanggal_menikah=?, foto_nikah=? WHERE id=?""",
-                (kepala_nama, kepala_nik, pasangan_nama, pasangan_nik or None,
-                 status, tanggal, foto_final, fid))
+            if ks_hash:
+                conn.execute(
+                    """UPDATE families SET kepala_nama=?, kepala_nik=?, pasangan_nama=?,
+                       pasangan_nik=?, status=?, tanggal_menikah=?, foto_nikah=?,
+                       kata_sandi_hash=?, kata_sandi_salt=? WHERE id=?""",
+                    (kepala_nama, kepala_nik, pasangan_nama, pasangan_nik or None,
+                     status, tanggal, foto_final, ks_hash, ks_salt, fid))
+            else:
+                conn.execute(
+                    """UPDATE families SET kepala_nama=?, kepala_nik=?, pasangan_nama=?,
+                       pasangan_nik=?, status=?, tanggal_menikah=?, foto_nikah=? WHERE id=?""",
+                    (kepala_nama, kepala_nik, pasangan_nama, pasangan_nik or None,
+                     status, tanggal, foto_final, fid))
             conn.commit()
             conn.close()
             if foto_baru and lama["foto_nikah"] and lama["foto_nikah"] != foto_baru:
@@ -848,6 +1413,9 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
             return self.not_found(user)
         anak = conn.execute("SELECT foto FROM children WHERE family_id=?", (fid,)).fetchall()
+        doks = conn.execute("SELECT stored_name FROM dokumen WHERE family_id=?",
+                            (fid,)).fetchall()
+        conn.execute("DELETE FROM dokumen WHERE family_id=?", (fid,))
         conn.execute("DELETE FROM children WHERE family_id=?", (fid,))
         conn.execute("DELETE FROM families WHERE id=?", (fid,))
         conn.commit()
@@ -855,6 +1423,8 @@ class Handler(BaseHTTPRequestHandler):
         delete_upload(fam["foto_nikah"])
         for a in anak:
             delete_upload(a["foto"])
+        for d in doks:
+            delete_upload(d["stored_name"])
         return self.redirect("/admin", "Data keluarga dihapus.")
 
     # -- admin: anak ----------------------------------------------------------
@@ -936,10 +1506,15 @@ class Handler(BaseHTTPRequestHandler):
         if not a:
             conn.close()
             return self.not_found(user)
+        doks = conn.execute("SELECT stored_name FROM dokumen WHERE child_id=?",
+                            (cid,)).fetchall()
+        conn.execute("DELETE FROM dokumen WHERE child_id=?", (cid,))
         conn.execute("DELETE FROM children WHERE id=?", (cid,))
         conn.commit()
         conn.close()
         delete_upload(a["foto"])
+        for d in doks:
+            delete_upload(d["stored_name"])
         return self.redirect(f"/admin/keluarga/{a['family_id']}", "Anak dihapus.")
 
     def post_anak_pindah(self, user, cid, arah):
@@ -987,7 +1562,14 @@ class Handler(BaseHTTPRequestHandler):
         church = nama_gereja(conn)
         banner = get_setting(conn, "banner_foto", "")
         wallpaper = get_setting(conn, "wallpaper_foto", "")
+        logo = get_setting(conn, "logo", "")
         conn.close()
+        seksi_logo = self._seksi_gambar(
+            "Logo Gereja",
+            "Logo tampil di halaman publik (di atas kartu pencarian), halaman "
+            "masuk, dan kepala aplikasi. Gunakan gambar persegi, misalnya PNG "
+            "berlatar transparan.",
+            "/admin/pengaturan/logo", logo)
         seksi_banner = self._seksi_gambar(
             "Banner Halaman Publik",
             "Banner tampil membentang di bagian atas halaman publik (halaman pencarian jemaat).",
@@ -1003,6 +1585,7 @@ class Handler(BaseHTTPRequestHandler):
         <form method="post" action="/admin/pengaturan">
           <label>Nama Gereja <input name="nama_gereja" required value="{esc(church)}"></label>
           <button type="submit">Simpan Nama Gereja</button></form></section>
+        {seksi_logo}
         {seksi_banner}
         {seksi_wallpaper}
         <section class="panel"><h3>Backup &amp; Pulihkan</h3>
@@ -1013,7 +1596,8 @@ class Handler(BaseHTTPRequestHandler):
         <form method="post" action="/ganti-password">
           <label>Password baru <input name="password" type="password" required minlength="8"></label>
           <button type="submit">Ganti Password</button></form></section>"""
-        return self.send_html(layout(user, church, "Pengaturan", body, flash))
+        return self.send_html(layout(user, church, "Pengaturan", body, flash,
+                                     aktif="pengaturan"))
 
     def post_pengaturan(self, user, f):
         nama = (f.get("nama_gereja") or "").strip()
@@ -1057,8 +1641,7 @@ class Handler(BaseHTTPRequestHandler):
         conn.commit()
         conn.close()
         delete_upload(lama)
-        return self.redirect("/admin/pengaturan",
-                             f"{label} dihapus. Halaman publik kembali ke tampilan bawaan.")
+        return self.redirect("/admin/pengaturan", f"{label} dihapus.")
 
     def post_ganti_password(self, user, f):
         if len(f.get("password") or "") < 8:
@@ -1077,10 +1660,11 @@ class Handler(BaseHTTPRequestHandler):
         body = """<h2>Backup &amp; Pulihkan</h2>
         <section class="panel"><h3>Unduh Backup</h3>
         <p><small>Satu berkas ZIP berisi SELURUH data aplikasi ini: database
-        (semua keluarga, anak, akun admin, dan pengaturan) serta semua berkas
-        foto (foto keluarga, banner, dan wallpaper). Simpan berkas ini di
-        tempat yang aman — berkas inilah yang dipakai untuk memulihkan data
-        bila suatu saat data di server hilang.</small></p>
+        (semua keluarga, anak, dokumen, akun admin, dan pengaturan) serta
+        semua berkas di folder unggahan (foto keluarga, dokumen, banner,
+        wallpaper, dan logo). Simpan berkas ini di tempat yang aman —
+        berkas inilah yang dipakai untuk memulihkan data bila suatu saat
+        data di server hilang.</small></p>
         <p><a href="/admin/backup/unduh"><button type="button">Unduh Backup (.zip)</button></a></p></section>
         <section class="panel"><h3>Pulihkan dari Backup</h3>
         <div class="flash warn">PERINGATAN: memulihkan backup akan MENGGANTI
@@ -1091,7 +1675,8 @@ class Handler(BaseHTTPRequestHandler):
           onsubmit="return confirm('Pulihkan backup ini? SELURUH data saat ini akan diganti dengan isi backup.')">
           <label>Berkas backup (.zip) <input name="berkas" type="file" accept=".zip" required></label>
           <button type="submit" class="danger">Pulihkan Backup</button></form></section>"""
-        return self.send_html(layout(user, church, "Backup & Pulihkan", body, flash))
+        return self.send_html(layout(user, church, "Backup & Pulihkan", body, flash,
+                                     aktif="backup"))
 
     def admin_backup_unduh(self, user):
         """Bangun ZIP backup saat itu juga: salinan database yang konsisten
@@ -1165,7 +1750,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not name.startswith("uploads/"):
                         continue
                     base = os.path.basename(name)
-                    if not base or not FOTO_NAME_RE.fullmatch(base):
+                    if not base or not (FOTO_NAME_RE.fullmatch(base)
+                                        or DOK_NAME_RE.fullmatch(base)):
                         continue  # lewati entri asing / upaya zip-slip
                     with open(os.path.join(uploads_baru, base), "wb") as fh:
                         fh.write(zf.read(name))
@@ -1196,6 +1782,17 @@ class Handler(BaseHTTPRequestHandler):
                 shutil.copyfile(os.path.join(uploads_baru, name),
                                 os.path.join(UPLOADS_DIR, name))
             shutil.copyfile(db_baru, DB_PATH)
+            # Backup dari versi lama mungkin belum punya tabel/kolom baru:
+            # jalankan skema + migrasi ringan pada database hasil pulihkan.
+            conn = db()
+            conn.executescript(SCHEMA)
+            kolom = {r[1] for r in conn.execute("PRAGMA table_info(families)")}
+            if "kata_sandi_hash" not in kolom:
+                conn.execute("ALTER TABLE families ADD COLUMN kata_sandi_hash TEXT")
+            if "kata_sandi_salt" not in kolom:
+                conn.execute("ALTER TABLE families ADD COLUMN kata_sandi_salt TEXT")
+            conn.commit()
+            conn.close()
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
         # Database berganti (termasuk akun admin di dalamnya): semua sesi
