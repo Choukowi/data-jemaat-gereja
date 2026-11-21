@@ -1,25 +1,30 @@
 /* Data Jemaat Gereja — tampilan modern: kerangka aplikasi (sidebar di
-   desktop, bilah atas + navigasi bawah di HP), palet ungu tua dengan
-   aksen emas. Berbeda identitas dari aplikasi Absen (biru/indigo). */
+   desktop, bilah atas + navigasi bawah di HP), palet warna tema yang
+   bisa diganti admin di Pengaturan (bawaan KREM, di bawah ini) dengan
+   aksen emas. Nilai --warna-utama* & --teks-di-* di :root ini adalah
+   bawaan krem; layout menimpanya per halaman dari Pengaturan.
+   Berbeda identitas dari aplikasi Absen (biru/indigo). */
 :root {
-  --warna-utama: #6d28d9;
-  --warna-utama-gelap: #4c1d95;
-  --warna-utama-muda: #ede9fe;
+  --warna-utama: #efe3c8;
+  --warna-utama-gelap: #948d7c;
+  --warna-utama-muda: #fdfbf7;
+  --teks-di-utama: #43302b;
+  --teks-di-gelap: #ffffff;
   --warna-aksen: #d97706;
   --warna-emas: #e8a93c;
   --latar: #faf6ef;
   --kartu: #ffffff;
   --garis: #e7dcc8;
-  --teks: #2e2438;
-  --teks-redup: #7d7390;
+  --teks: #38302a;
+  --teks-redup: #8a7d6b;
   --bahaya: #b3261e;
-  --bayangan: 0 8px 24px rgba(76, 29, 149, .10);
+  --bayangan: 0 8px 24px rgba(93, 74, 47, .12);
   --radius: 16px;
 }
 * { box-sizing: border-box; }
 body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
   background: var(--latar); color: var(--teks); }
-a { color: var(--warna-utama); }
+a { color: var(--warna-utama-gelap); }
 h2 { margin-top: 0; }
 
 /* ---------- Kerangka aplikasi (admin & jemaat) ---------- */
@@ -28,10 +33,10 @@ h2 { margin-top: 0; }
 .shell-main { min-height: 100vh; display: flex; flex-direction: column; }
 .shell-main main { flex: 1; width: 100%; max-width: 920px; margin: 0 auto;
   padding: 18px 16px 96px; }
-.topbar { display: flex; align-items: center; gap: 10px; color: #fff;
+.topbar { display: flex; align-items: center; gap: 10px; color: var(--teks-di-utama);
   padding: 12px 16px; position: sticky; top: 0; z-index: 20;
   background: linear-gradient(120deg, var(--warna-utama-gelap), var(--warna-utama));
-  box-shadow: 0 2px 10px rgba(76, 29, 149, .25); }
+  box-shadow: 0 2px 10px rgba(46, 36, 56, .18); }
 .topbar b { font-size: 1.02rem; }
 .top-user { margin-left: auto; font-size: .82rem; opacity: .92;
   max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -41,7 +46,7 @@ h2 { margin-top: 0; }
 .bottom-nav a { flex: 1; display: flex; flex-direction: column; align-items: center;
   gap: 2px; padding: 8px 2px 10px; color: var(--teks-redup);
   text-decoration: none; font-size: .68rem; font-weight: 600; }
-.bottom-nav a.aktif { color: var(--warna-utama); }
+.bottom-nav a.aktif { color: var(--warna-utama-gelap); }
 .bottom-nav a.aktif .ikon { color: var(--warna-aksen); }
 .kaki { text-align: center; color: var(--teks-redup); padding: 10px 16px 96px; }
 .ikon { width: 22px; height: 22px; flex: none; }
@@ -50,14 +55,16 @@ h2 { margin-top: 0; }
   .shell { display: flex; }
   .sidebar { display: flex; flex-direction: column; gap: 18px;
     width: 264px; flex: none; height: 100vh; position: sticky; top: 0;
-    padding: 20px 14px; color: #fff;
+    padding: 20px 14px; color: var(--teks-di-utama);
     background: linear-gradient(170deg, var(--warna-utama-gelap), var(--warna-utama) 70%);
   }
   .side-nav { display: flex; flex-direction: column; gap: 4px; }
   .side-nav a { display: flex; align-items: center; gap: 10px;
-    padding: 10px 12px; border-radius: 12px; color: #e9e2fb;
+    padding: 10px 12px; border-radius: 12px; color: var(--teks-di-utama);
     text-decoration: none; font-size: .95rem; font-weight: 600; }
   .side-nav a:hover { background: rgba(255, 255, 255, .12); }
+  body.tema-terang .side-nav a:hover { background: rgba(67, 48, 43, .10); }
+  body.tema-terang .side-user { background: rgba(67, 48, 43, .08); }
   .side-nav a.aktif { background: #fff; color: var(--warna-utama-gelap);
     box-shadow: 0 4px 12px rgba(0, 0, 0, .18); }
   .side-nav a.aktif .ikon { color: var(--warna-aksen); }
@@ -104,14 +111,15 @@ main { padding: 0; }
 label { display: block; margin: 10px 0; font-size: .95rem; }
 label.cek input { display: inline-block; width: auto; margin-right: 6px; }
 input, select { display: block; width: 100%; padding: 10px 12px; margin-top: 4px;
-  font-size: 1rem; border: 1px solid #cfc3e0; border-radius: 10px;
+  font-size: 1rem; border: 1px solid #d9cfb8; border-radius: 10px;
   background: #fff; color: var(--teks); }
 input:focus, select:focus { outline: 2px solid var(--warna-utama-muda);
-  border-color: var(--warna-utama); }
+  border-color: var(--warna-utama-gelap); }
+input[type="color"] { width: 92px; height: 44px; padding: 4px; cursor: pointer; }
 button { background: linear-gradient(120deg, var(--warna-utama), var(--warna-utama-gelap));
-  color: #fff; border: 0; padding: 10px 18px; border-radius: 10px;
+  color: var(--teks-di-utama); border: 0; padding: 10px 18px; border-radius: 10px;
   font-size: 1rem; font-weight: 600; cursor: pointer; margin: 6px 4px 6px 0;
-  box-shadow: 0 3px 10px rgba(109, 40, 217, .25); }
+  box-shadow: 0 3px 10px rgba(46, 36, 56, .18); }
 button:hover { filter: brightness(1.07); }
 button.danger { background: var(--bahaya); box-shadow: none; }
 form.inline { display: inline; }
@@ -142,7 +150,7 @@ code { background: var(--warna-utama-muda); padding: 1px 5px; border-radius: 4px
 .kartu-cari h2 { margin: 0 0 6px; color: var(--warna-utama-gelap); }
 .kartu-login-jemaat h3 { color: var(--warna-utama-gelap); }
 .cari-lagi { margin: 14px 0; }
-.cari-lagi a { display: inline-block; background: var(--warna-utama); color: #fff;
+.cari-lagi a { display: inline-block; background: var(--warna-utama); color: var(--teks-di-utama);
   text-decoration: none; padding: 10px 16px; border-radius: 10px;
   font-size: 1rem; font-weight: 600; }
 .foto-nikah { display: block; width: 100%; max-width: 520px; border-radius: 12px; margin: 10px 0; }
@@ -153,17 +161,37 @@ code { background: var(--warna-utama-muda); padding: 1px 5px; border-radius: 4px
 .anak-list li { padding: 10px 0; border-bottom: 1px solid #f0e9da; }
 .anak-list li > div:first-child { display: flex; align-items: center;
   flex-wrap: wrap; gap: 4px; }
-.anak-label { background: var(--warna-utama); color: #fff; border-radius: 999px;
+.anak-label { background: var(--warna-utama); color: var(--teks-di-utama); border-radius: 999px;
   padding: 2px 10px; font-size: .82rem; font-weight: 600; }
 .pratinjau-foto { display: block; max-width: 220px; border-radius: 10px; margin-top: 8px; }
 
 /* ---------- Dokumen ---------- */
-.dok-slot { border: 1px dashed #cfc3e0; border-radius: 12px;
-  padding: 12px 14px; margin: 10px 0; background: #fcfaff; }
+.dok-slot { border: 1px dashed var(--garis); border-radius: 12px;
+  padding: 12px 14px; margin: 10px 0; background: #fffdf6; }
 .dok-slot p { margin: 4px 0 8px; }
 .dok-anak { margin: 8px 0 2px 10px; }
 .dok-list { list-style: none; padding-left: 0; }
 .dok-list li { padding: 10px 0; border-bottom: 1px solid #f0e9da; }
+
+/* ---------- Kartu statistik gabungan (dashboard) & daftar keluarga ---------- */
+a.stat-gabung { display: flex; flex-direction: row; align-items: center; gap: 12px;
+  text-decoration: none; color: inherit; cursor: pointer; width: 100%;
+  transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease; }
+a.stat-gabung:hover { transform: translateY(-2px); border-color: var(--warna-emas);
+  box-shadow: 0 12px 28px rgba(93, 74, 47, .18); }
+.stat-isi { font-size: 1.05rem; color: var(--teks-redup); }
+.stat-isi b { font-size: 1.6rem; color: var(--warna-utama-gelap); }
+.stat-titik { color: var(--warna-aksen); font-weight: 800; }
+.stat-buka { margin-left: auto; color: var(--warna-utama-gelap);
+  font-weight: 700; font-size: .9rem; white-space: nowrap; }
+.anak-cocok { color: var(--warna-aksen); font-weight: 700; }
+
+/* ---------- Pemilih warna tema (Pengaturan) ---------- */
+.swatch-baris { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.swatch-form { margin: 0; }
+button.swatch { width: 76px; height: 48px; margin: 0; padding: 6px;
+  font-size: .85rem; border: 1px solid var(--garis); box-shadow: none; }
+button.swatch.terpilih { outline: 3px solid var(--warna-aksen); outline-offset: 2px; }
 
 /* ---------- Banner & wallpaper (diatur admin di Pengaturan) ---------- */
 .banner { display: block; width: 100%; max-height: 280px; object-fit: cover;
