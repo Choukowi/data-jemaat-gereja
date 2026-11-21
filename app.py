@@ -158,6 +158,84 @@ def nama_gereja(conn):
     return get_setting(conn, "nama_gereja", "Gereja Kami") or "Gereja Kami"
 
 
+# ---------------------------------------------------------------------------
+# Warna tema (bisa diganti admin di Pengaturan; bawaan = krem)
+# Satu warna dasar (#rrggbb, kunci settings 'warna_tema') menggerakkan
+# variabel CSS: --warna-utama = warna itu sendiri, --warna-utama-gelap =
+# bayangan lebih gelap (RGB x 0,62), --warna-utama-muda = versi sangat
+# terang, dan warna teks di atas bidang berwarna dipilih dari luminansi
+# (cokelat tua di atas warna terang, putih di atas warna gelap) supaya
+# tombol/lencana/menu selalu terbaca — termasuk tema krem yang terang.
+# ---------------------------------------------------------------------------
+WARNA_TEMA_DEFAULT = "#efe3c8"
+WARNA_TEMA_PRESET = (
+    ("Krem", "#efe3c8"),
+    ("Ungu", "#6d28d9"),
+    ("Biru", "#2563eb"),
+    ("Hijau", "#15803d"),
+    ("Marun", "#9f1239"),
+    ("Cokelat", "#92400e"),
+)
+WARNA_HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
+TEKS_DI_TERANG = "#43302b"  # cokelat tua untuk bidang berwarna terang
+
+
+def _rgb(hexs):
+    return tuple(int(hexs[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _ke_hex(r, g, b):
+    return "#%02x%02x%02x" % (r, g, b)
+
+
+def warna_gelap(hexs, faktor=0.62):
+    """Bayangan lebih gelap dari warna tema: tiap kanal RGB x faktor."""
+    r, g, b = _rgb(hexs)
+    return _ke_hex(round(r * faktor), round(g * faktor), round(b * faktor))
+
+
+def warna_muda(hexs, frac=0.85):
+    """Versi sangat terang: warna digeser menuju putih sebesar frac."""
+    r, g, b = _rgb(hexs)
+    return _ke_hex(round(r + (255 - r) * frac),
+                   round(g + (255 - g) * frac),
+                   round(b + (255 - b) * frac))
+
+
+def _luminansi(hexs):
+    """Luminansi relatif (WCAG) 0..1 dari warna #rrggbb."""
+    def lin(c):
+        c = c / 255.0
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = _rgb(hexs)
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+
+def teks_di(warna):
+    """Warna teks di atas bidang berwarna `warna`: putih atau cokelat tua,
+    dipilih yang kontras luminansinya lebih baik."""
+    lum = _luminansi(warna)
+    kontras_putih = 1.05 / (lum + 0.05)
+    kontras_gelap = (lum + 0.05) / (_luminansi(TEKS_DI_TERANG) + 0.05)
+    return "#ffffff" if kontras_putih >= kontras_gelap else TEKS_DI_TERANG
+
+
+def tema_dari(warna):
+    """(blok <style> penimpa variabel :root, kelas tema) untuk warna tema
+    tersimpan. Warna tak sah -> bawaan krem."""
+    if not warna or not WARNA_HEX_RE.fullmatch(warna.strip()):
+        warna = WARNA_TEMA_DEFAULT
+    warna = warna.strip().lower()
+    gelap = warna_gelap(warna)
+    style = (f"<style>:root{{--warna-utama:{warna};"
+             f"--warna-utama-gelap:{gelap};"
+             f"--warna-utama-muda:{warna_muda(warna)};"
+             f"--teks-di-utama:{teks_di(warna)};"
+             f"--teks-di-gelap:{teks_di(gelap)};}}</style>")
+    kelas = "tema-terang" if teks_di(warna) == TEKS_DI_TERANG else "tema-gelap"
+    return style, kelas
+
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     os.makedirs(UPLOADS_DIR, exist_ok=True)
@@ -287,7 +365,8 @@ def save_dokumen(files, field):
 
 # ---------------------------------------------------------------------------
 # HTML layout — kerangka aplikasi modern (sidebar desktop + bilah atas &
-# navigasi bawah di HP), palet ungu tua + aksen emas. Varian:
+# navigasi bawah di HP), palet warna tema yang bisa diganti admin di
+# Pengaturan (bawaan krem) + aksen emas. Varian:
 #   publik=True  -> halaman publik minimal (tanpa nav/header/footer;
 #                   nama gereja hanya di <title>)
 #   user=...     -> kerangka ADMIN (sidebar/bottom-nav admin)
@@ -295,12 +374,13 @@ def save_dokumen(files, field):
 #   tanpa keduanya (mis. halaman /login) -> kartu tengah polos bermerek
 # ---------------------------------------------------------------------------
 def _situs():
-    """Pengaturan tampilan situs dari Pengaturan: (wallpaper, logo)."""
+    """Pengaturan tampilan situs dari Pengaturan: (wallpaper, logo, warna tema)."""
     conn = db()
     wp = get_setting(conn, "wallpaper_foto", "")
     logo = get_setting(conn, "logo", "")
+    warna = get_setting(conn, "warna_tema", "")
     conn.close()
-    return wp, logo
+    return wp, logo, warna
 
 
 def logo_html(logo, css_class="logo-img"):
@@ -347,7 +427,8 @@ def layout(user, church, title, body, flash="", bg=None, publik=False,
     # Bila tidak diberikan, diambil dari Pengaturan — wallpaper berlaku
     # di semua halaman. extra_script: skrip tambahan persis sebelum
     # </body> (dipakai halaman publik hasil pencarian untuk replaceState).
-    wallpaper, logo = _situs()
+    wallpaper, logo, warna_tema = _situs()
+    tema_style, tema_kelas = tema_dari(warna_tema)
     latar = bg if bg is not None else wallpaper
     bg_style = ""
     if latar:
@@ -364,8 +445,8 @@ def layout(user, church, title, body, flash="", bg=None, publik=False,
 <html lang="id"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)} - {esc(church)}</title>
-<link rel="stylesheet" href="/static/style.css">{bg_style}</head>
-<body class="publik">{kerangka_buka}{flash_html}{body}{kerangka_tutup}
+<link rel="stylesheet" href="/static/style.css">{tema_style}{bg_style}</head>
+<body class="publik {tema_kelas}">{kerangka_buka}{flash_html}{body}{kerangka_tutup}
 <script src="/static/app.js"></script>{extra_script}
 </body></html>"""
     if user or member:
@@ -415,8 +496,8 @@ def layout(user, church, title, body, flash="", bg=None, publik=False,
 <html lang="id"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)} - {esc(church)}</title>
-<link rel="stylesheet" href="/static/style.css">{bg_style}</head>
-<body>{kerangka}
+<link rel="stylesheet" href="/static/style.css">{tema_style}{bg_style}</head>
+<body class="{tema_kelas}">{kerangka}
 <script src="/static/app.js"></script>{extra_script}
 </body></html>"""
     # Tanpa sesi (halaman masuk & galat): kartu tengah polos bermerek.
@@ -424,8 +505,8 @@ def layout(user, church, title, body, flash="", bg=None, publik=False,
 <html lang="id"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)} - {esc(church)}</title>
-<link rel="stylesheet" href="/static/style.css">{bg_style}</head>
-<body class="polos"><main class="polos-main">
+<link rel="stylesheet" href="/static/style.css">{tema_style}{bg_style}</head>
+<body class="polos {tema_kelas}"><main class="polos-main">
 <div class="brand-center">{logo_html(logo, "logo-img besar")}<div class="brand-nama-besar">{esc(church)}</div></div>
 {flash_html}{body}</main>
 <script src="/static/app.js"></script>{extra_script}
@@ -621,6 +702,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect("/login", "Silakan masuk dulu.")
         if path == "/admin":
             return self.admin_dashboard(user, qs, flash)
+        if path == "/admin/keluarga":
+            return self.admin_keluarga_list(user, qs, flash)
         if path == "/admin/keluarga/baru":
             return self.admin_keluarga_form(user, None, flash)
         if path == "/admin/pengaturan":
@@ -680,6 +763,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.redirect(tujuan, str(e))
             return self.dispatch_dokumen(user, path, f_dok, files_dok)
         f, files = self.read_form()
+        if path == "/admin/pengaturan/warna":
+            return self.post_warna_tema(user, f)
         if path == "/admin/pengaturan":
             return self.post_pengaturan(user, f)
         if path == "/admin/pengaturan/banner":
@@ -1121,11 +1206,56 @@ class Handler(BaseHTTPRequestHandler):
     # ADMIN
     # -----------------------------------------------------------------------
     def admin_dashboard(self, user, qs, flash):
+        # Dashboard ringkas: peringatan password, SATU kartu statistik
+        # gabungan (Keluarga + Anak) yang bisa diklik menuju daftar
+        # keluarga, tombol tambah, dan formulir pencarian (hasilnya
+        # tampil di /admin/keluarga). Daftar keluarga TIDAK lagi tampil
+        # di sini — pindah utuh ke /admin/keluarga.
+        conn = db()
+        church = nama_gereja(conn)
+        total_keluarga = conn.execute("SELECT COUNT(*) c FROM families").fetchone()["c"]
+        total_anak = conn.execute("SELECT COUNT(*) c FROM children").fetchone()["c"]
+        me = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+        conn.close()
+        warn = ""
+        if me and verify_password("admin123", me["password_hash"], me["salt"]):
+            warn = ('<div class="flash warn">PERINGATAN: akun admin ini masih memakai '
+                    'password awal lokal. Segera ganti lewat menu Pengaturan '
+                    'sebelum dipakai beneran.</div>')
+        body = f"""<h2>Dashboard Admin</h2>{warn}
+        <a class="card stat-gabung" href="/admin/keluarga">
+          <span class="stat-isi"><b>{total_keluarga}</b> Keluarga
+            <span class="stat-titik">&bull;</span> <b>{total_anak}</b> Anak</span>
+          <span class="stat-buka">Lihat daftar &rarr;</span></a>
+        <p><a href="/admin/keluarga/baru"><button type="button">+ Tambah Keluarga</button></a></p>
+        <form method="get" action="/admin/keluarga">
+          <label>Cari keluarga (nama / NIK / nama anak) <input name="q" autocomplete="off"></label>
+          <button type="submit">Cari</button></form>"""
+        return self.send_html(layout(user, church, "Dashboard Admin", body, flash,
+                                     aktif="dashboard"))
+
+    @staticmethod
+    def _lencana_keluarga(r):
+        """Lencana di baris daftar keluarga: jumlah dokumen + status
+        login jemaat."""
+        b = ""
+        if r["jml_dok"]:
+            b += f' <span class="lencana">Dokumen: {r["jml_dok"]}</span>'
+        if r["kata_sandi_hash"]:
+            b += ' <span class="lencana emas">Login jemaat aktif</span>'
+        return b
+
+    def admin_keluarga_list(self, user, qs, flash):
+        # Halaman daftar keluarga (dipindah dari dashboard). Pencarian q
+        # mencocokkan sebagian nama kepala/pasangan, NIK kepala/pasangan,
+        # DAN nama anak: keluarga yang ANAKNYA cocok ikut tampil, dengan
+        # baris "Anak yang cocok: ..." di bawah baris keluarganya.
         conn = db()
         church = nama_gereja(conn)
         q = (qs.get("q") or [""])[0].strip()
         kolom_tambahan = (", (SELECT COUNT(*) FROM children c WHERE c.family_id=f.id) jml_anak"
                           ", (SELECT COUNT(*) FROM dokumen d WHERE d.family_id=f.id) jml_dok")
+        cocok_anak = {}
         if q:
             like = f"%{q}%"
             rows = conn.execute(
@@ -1133,47 +1263,49 @@ class Handler(BaseHTTPRequestHandler):
                    FROM families f
                    WHERE f.kepala_nama LIKE ? OR f.pasangan_nama LIKE ?
                       OR f.kepala_nik LIKE ? OR f.pasangan_nik LIKE ?
+                      OR EXISTS (SELECT 1 FROM children ca
+                                 WHERE ca.family_id=f.id AND ca.nama LIKE ?)
                    ORDER BY f.kepala_nama LIMIT 100""",
-                (like, like, like, like)).fetchall()
+                (like, like, like, like, like)).fetchall()
+            if rows:
+                ids = [r["id"] for r in rows]
+                tanda = ",".join("?" * len(ids))
+                for c in conn.execute(
+                        f"""SELECT family_id, nama FROM children
+                            WHERE family_id IN ({tanda}) AND nama LIKE ?
+                            ORDER BY urutan, id""",
+                        (*ids, like)).fetchall():
+                    cocok_anak.setdefault(c["family_id"], []).append(c["nama"])
         else:
             rows = conn.execute(
                 f"""SELECT f.* {kolom_tambahan}
                    FROM families f ORDER BY f.kepala_nama LIMIT 100""").fetchall()
-        total_keluarga = conn.execute("SELECT COUNT(*) c FROM families").fetchone()["c"]
-        total_anak = conn.execute("SELECT COUNT(*) c FROM children").fetchone()["c"]
         conn.close()
-        def lencana(r):
-            b = ""
-            if r["jml_dok"]:
-                b += f' <span class="lencana">Dokumen: {r["jml_dok"]}</span>'
-            if r["kata_sandi_hash"]:
-                b += ' <span class="lencana emas">Login jemaat aktif</span>'
-            return b
-        items = "".join(
-            f"""<li><a href="/admin/keluarga/{r['id']}"><b>{esc(r['kepala_nama'])}</b></a>
+
+        def baris(r):
+            h = f"""<li><a href="/admin/keluarga/{r['id']}"><b>{esc(r['kepala_nama'])}</b></a>
             &mdash; pasangan: {esc(r['pasangan_nama'] or '-')}
-            &mdash; {esc(r['status'])} &mdash; {r['jml_anak']} anak{lencana(r)}
-            <br><small>NIK kepala: <code>{esc(r['kepala_nik'])}</code></small></li>"""
-            for r in rows) or "<li>Belum ada data keluarga.</li>"
-        warn = ""
-        conn = db()
-        me = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
-        conn.close()
-        if me and verify_password("admin123", me["password_hash"], me["salt"]):
-            warn = ('<div class="flash warn">PERINGATAN: akun admin ini masih memakai '
-                    'password awal lokal. Segera ganti lewat menu Pengaturan '
-                    'sebelum dipakai beneran.</div>')
-        body = f"""<h2>Dashboard Admin</h2>{warn}
-        <div class="grid">
-          <div class="card"><b>{total_keluarga}</b><span>Keluarga</span></div>
-          <div class="card"><b>{total_anak}</b><span>Anak</span></div>
-        </div>
+            &mdash; {esc(r['status'])} &mdash; {r['jml_anak']} anak{self._lencana_keluarga(r)}
+            <br><small>NIK kepala: <code>{esc(r['kepala_nik'])}</code></small>"""
+            if cocok_anak.get(r["id"]):
+                nama_cocok = ", ".join(esc(n) for n in cocok_anak[r["id"]])
+                h += (f'<br><small class="anak-cocok">Anak yang cocok: '
+                      f'{nama_cocok}</small>')
+            return h + "</li>"
+
+        if rows:
+            daftar = f"<ul>{''.join(baris(r) for r in rows)}</ul>"
+        elif q:
+            daftar = f'<p>Tidak ada keluarga yang cocok dengan "{esc(q)}".</p>'
+        else:
+            daftar = "<p>Belum ada data keluarga.</p>"
+        body = f"""<h2>Daftar Keluarga</h2>
         <p><a href="/admin/keluarga/baru"><button type="button">+ Tambah Keluarga</button></a></p>
-        <form method="get" action="/admin">
-          <label>Cari keluarga (nama / NIK) <input name="q" value="{esc(q)}" autocomplete="off"></label>
+        <form method="get" action="/admin/keluarga">
+          <label>Cari keluarga (nama / NIK / nama anak) <input name="q" value="{esc(q)}" autocomplete="off"></label>
           <button type="submit">Cari</button></form>
-        <h3>Daftar Keluarga</h3><ul>{items}</ul>"""
-        return self.send_html(layout(user, church, "Dashboard Admin", body, flash,
+        {daftar}"""
+        return self.send_html(layout(user, church, "Daftar Keluarga", body, flash,
                                      aktif="dashboard"))
 
     def admin_keluarga_form(self, user, fid, flash):
@@ -1563,7 +1695,27 @@ class Handler(BaseHTTPRequestHandler):
         banner = get_setting(conn, "banner_foto", "")
         wallpaper = get_setting(conn, "wallpaper_foto", "")
         logo = get_setting(conn, "logo", "")
+        warna = get_setting(conn, "warna_tema", "") or WARNA_TEMA_DEFAULT
+        if not WARNA_HEX_RE.fullmatch(warna):
+            warna = WARNA_TEMA_DEFAULT
+        warna = warna.lower()
         conn.close()
+        swatch_html = ""
+        for nama_preset, hex_preset in WARNA_TEMA_PRESET:
+            terpilih = ' terpilih' if hex_preset == warna else ""
+            swatch_html += f"""<form method="post" action="/admin/pengaturan/warna" class="swatch-form">
+              <input type="hidden" name="warna" value="{hex_preset}">
+              <button type="submit" class="swatch{terpilih}"
+                style="background:{hex_preset};color:{teks_di(hex_preset)}">{nama_preset}</button></form>"""
+        seksi_warna = f"""<section class="panel"><h3>Warna Tema</h3>
+        <p><small>Warna utama aplikasi: tombol, kepala halaman, dan menu.
+        Warna gelap pendamping serta warna teks di atasnya dihitung
+        otomatis agar tetap terbaca. Berlaku di semua halaman (admin,
+        jemaat, masuk, dan halaman publik).</small></p>
+        <div class="swatch-baris">{swatch_html}</div>
+        <form method="post" action="/admin/pengaturan/warna">
+          <label>Warna khusus <input type="color" name="warna" value="{esc(warna)}"></label>
+          <button type="submit">Simpan Warna</button></form></section>"""
         seksi_logo = self._seksi_gambar(
             "Logo Gereja",
             "Logo tampil di halaman publik (di atas kartu pencarian), halaman "
@@ -1585,6 +1737,7 @@ class Handler(BaseHTTPRequestHandler):
         <form method="post" action="/admin/pengaturan">
           <label>Nama Gereja <input name="nama_gereja" required value="{esc(church)}"></label>
           <button type="submit">Simpan Nama Gereja</button></form></section>
+        {seksi_warna}
         {seksi_logo}
         {seksi_banner}
         {seksi_wallpaper}
@@ -1610,6 +1763,19 @@ class Handler(BaseHTTPRequestHandler):
         conn.commit()
         conn.close()
         return self.redirect("/admin/pengaturan", "Nama gereja disimpan.")
+
+    def post_warna_tema(self, user, f):
+        """Simpan warna tema dari Pengaturan (preset maupun pemilih warna
+        khusus). Hanya format #rrggbb yang diterima."""
+        warna = (f.get("warna") or "").strip().lower()
+        if not WARNA_HEX_RE.fullmatch(warna):
+            return self.redirect("/admin/pengaturan",
+                                 "Warna tidak dikenal — gunakan format #rrggbb.")
+        conn = db()
+        self._set_setting(conn, "warna_tema", warna)
+        conn.commit()
+        conn.close()
+        return self.redirect("/admin/pengaturan", "Warna tema disimpan.")
 
     def _set_setting(self, conn, key, value):
         conn.execute(

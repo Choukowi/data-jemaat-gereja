@@ -47,6 +47,16 @@ Yang dibuktikan:
   memulihkan ZIP itu di server BARU yang kosong mengembalikan keluarga,
   foto, dan kartu publiknya; berkas non-ZIP dan ZIP milik aplikasi lain
   ditolak tanpa mengubah data
+- Dashboard admin ringkas: SATU kartu statistik gabungan (Keluarga +
+  Anak) yang tertaut ke /admin/keluarga; daftar keluarga TIDAK lagi
+  tampil di dashboard; formulir cari dashboard menuju /admin/keluarga
+- Halaman /admin/keluarga (khusus admin): daftar keluarga lengkap dengan
+  lencana; pencarian mencocokkan nama/NIK kepala & pasangan DAN nama
+  anak — keluarga yang anaknya cocok tampil dengan "Anak yang cocok:"
+- Warna tema bisa diganti di Pengaturan (preset + warna khusus):
+  bawaan krem #efe3c8 menimpa --warna-utama di semua halaman (publik,
+  masuk, admin); bayangan gelap dihitung dari warna dasar; preset Ungu
+  mengembalikan #6d28d9
 """
 import io, json, os, re, subprocess, sys, tempfile, time, urllib.request, urllib.parse
 import urllib.error, http.cookiejar, uuid, zipfile
@@ -420,9 +430,9 @@ def main():
         s, url, page = req_multipart(admin, f"/admin/keluarga/{fid}/edit",
                                      fields_edit, {})
         must("AKTIF" in page, "admin mengatur password -> status login jemaat AKTIF")
-        s, url, dash = req(admin, "/admin")
-        must("Login jemaat aktif" in dash and "Dokumen: 2" in dash,
-             "dashboard: lencana 'Login jemaat aktif' + 'Dokumen: 2' tampil")
+        s, url, daftar_awal = req(admin, "/admin/keluarga")
+        must("Login jemaat aktif" in daftar_awal and "Dokumen: 2" in daftar_awal,
+             "daftar keluarga: lencana 'Login jemaat aktif' + 'Dokumen: 2' tampil")
         s, url, page = req(jemaat, "/login-jemaat",
                            {"nik": NIK_KEPALA, "password": "salah total"})
         must("NIK atau password salah" in page,
@@ -488,6 +498,57 @@ def main():
         must("logo-img" not in home_tanpa_logo,
              "setelah logo dihapus: halaman publik kembali ke tanda bawaan")
 
+        # 13E. Dashboard gabungan + halaman /admin/keluarga + cari nama
+        # anak + warna tema yang bisa diganti (bawaan krem).
+        s, url, dash = req(admin, "/admin")
+        must('href="/admin/keluarga"' in dash and "stat-gabung" in dash
+             and re.search(r"<b>\d+</b> Keluarga", dash)
+             and re.search(r"<b>\d+</b> Anak", dash),
+             "dashboard: SATU kartu statistik gabungan (Keluarga + Anak) tertaut ke /admin/keluarga")
+        must("Daftar Keluarga" not in dash and "Budi Uji Santoso" not in dash,
+             "dashboard: daftar keluarga & nama keluarga TIDAK tampil lagi")
+        must('action="/admin/keluarga"' in dash and "nama anak" in dash,
+             "dashboard: formulir cari menuju /admin/keluarga & menyebut nama anak")
+        s, url, daftar = req(admin, "/admin/keluarga")
+        must("Daftar Keluarga" in daftar and "Budi Uji Santoso" in daftar
+             and "Dedi Uji Lain" in daftar,
+             "/admin/keluarga: daftar lengkap keluarga tampil")
+        must("Login jemaat aktif" in daftar and "Dokumen: 2" in daftar,
+             "/admin/keluarga: lencana login jemaat + jumlah dokumen tampil")
+        q = urllib.parse.urlencode({"q": "Uji Satu"})
+        s, url, hasil_anak = req(admin, "/admin/keluarga?" + q)
+        must("Budi Uji Santoso" in hasil_anak and "Anak yang cocok:" in hasil_anak
+             and "Anak Uji Satu" in hasil_anak,
+             "cari nama anak: keluarga induknya ketemu + baris 'Anak yang cocok:'")
+        must("Dedi Uji Lain" not in hasil_anak,
+             "cari nama anak: keluarga lain tidak ikut tampil")
+        q = urllib.parse.urlencode({"q": "zzzngawur"})
+        s, url, hasil_kosong = req(admin, "/admin/keluarga?" + q)
+        must('Tidak ada keluarga yang cocok dengan "zzzngawur".' in hasil_kosong,
+             "cari tanpa hasil di /admin/keluarga: keadaan kosong yang ramah")
+        s, url, home_tema = req(publik, "/")
+        must("--warna-utama:#efe3c8" in home_tema
+             and "--warna-utama:#6d28d9" not in home_tema,
+             "tema bawaan: halaman publik memakai krem #efe3c8, bukan ungu")
+        s, url, login_tema = req(publik, "/login")
+        must("--warna-utama:#efe3c8" in login_tema,
+             "tema bawaan: halaman masuk ikut krem")
+        s, url, page = req(admin, "/admin/pengaturan/warna", {"warna": "#2563eb"})
+        must("Warna tema disimpan" in page, "POST warna tema khusus diterima")
+        s, url, dash_biru = req(admin, "/admin")
+        m_gelap = re.search(r"--warna-utama-gelap:(#[0-9a-f]{6})", dash_biru)
+        must("--warna-utama:#2563eb" in dash_biru and m_gelap is not None
+             and m_gelap.group(1) != "#2563eb",
+             "warna khusus: halaman membawa #2563eb + bayangan gelap hasil hitungan")
+        s, url, page = req(admin, "/admin/pengaturan/warna", {"warna": "#6d28d9"})
+        must("Warna tema disimpan" in page, "POST preset Ungu diterima")
+        s, url, dash_ungu = req(admin, "/admin")
+        must("--warna-utama:#6d28d9" in dash_ungu,
+             "preset Ungu: --warna-utama kembali #6d28d9")
+        s, url, page = req(jemaat, "/admin/keluarga")
+        must("/login" in url and "Daftar Keluarga" not in page,
+             "sesi jemaat TIDAK bisa membuka /admin/keluarga")
+
         # 14. Backup & Pulihkan: halaman khusus admin, unduh ZIP lengkap,
         # dan penolakan berkas yang salah (data tidak berubah).
         s, url, _ = req(publik, "/admin/backup")
@@ -519,8 +580,8 @@ def main():
             admin, "/admin/backup/pulihkan", {},
             {"berkas": ("bukan.zip", b"ini bukan zip sama sekali", "application/zip")})
         must("tidak valid" in page, "pulihkan berkas non-ZIP ditolak")
-        s, url, dash = req(admin, "/admin")
-        must("Budi Uji Santoso" in dash,
+        s, url, daftar = req(admin, "/admin/keluarga")
+        must("Budi Uji Santoso" in daftar,
              "setelah pulihkan non-ZIP gagal: data keluarga tetap ada")
         # Pulihkan zip milik APLIKASI LAIN -> ditolak dengan pesan khusus.
         buf = io.BytesIO()
@@ -532,8 +593,8 @@ def main():
             {"berkas": ("backup-lain.zip", buf.getvalue(), "application/zip")})
         must("Berkas ini bukan backup aplikasi data jemaat." in page,
              "pulihkan zip aplikasi lain ditolak dengan pesan khusus")
-        s, url, dash = req(admin, "/admin")
-        must("Budi Uji Santoso" in dash,
+        s, url, daftar = req(admin, "/admin/keluarga")
+        must("Budi Uji Santoso" in daftar,
              "setelah pulihkan zip aplikasi lain gagal: data keluarga tetap ada")
 
         # 15. Pulihkan backup yang sama di server BARU yang benar-benar
@@ -565,8 +626,8 @@ def main():
             admin2 = client()
             s, url, _ = req(admin2, "/login", {"username": "admin", "password": "admin123"})
             must("/admin" in url, "login admin di server kosong berhasil")
-            s, url, dash_kosong = req(admin2, "/admin")
-            must("Budi Uji Santoso" not in dash_kosong,
+            s, url, daftar_kosong = req(admin2, "/admin/keluarga")
+            must("Budi Uji Santoso" not in daftar_kosong,
                  "server kosong: keluarga memang belum ada")
             s, url, page = req_multipart(
                 admin2, "/admin/backup/pulihkan", {},
@@ -575,8 +636,8 @@ def main():
                  f"pulihkan backup -> diarahkan ke login + pesan sukses -> {url}")
             s, url, _ = req(admin2, "/login", {"username": "admin", "password": "admin123"})
             must("/admin" in url, "login lagi setelah pulihkan berhasil")
-            s, url, dash2 = req(admin2, "/admin")
-            must("Budi Uji Santoso" in dash2,
+            s, url, daftar2 = req(admin2, "/admin/keluarga")
+            must("Budi Uji Santoso" in daftar2,
                  "setelah pulihkan: keluarga kembali di daftar admin")
             r = admin2.open(BASE + "/foto/" + m_foto.group(1))
             must(r.status == 200 and r.read() == PNG_1PX,
