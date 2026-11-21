@@ -57,6 +57,11 @@ Yang dibuktikan:
   bawaan krem #efe3c8 menimpa --warna-utama di semua halaman (publik,
   masuk, admin); bayangan gelap dihitung dari warna dasar; preset Ungu
   mengembalikan #6d28d9
+- Tombol mata password: semua halaman berkolom password (masuk admin,
+  Login Jemaat publik, formulir keluarga, ganti password jemaat &
+  admin) memuat app.js; app.js memuat logika saklar pw-toggle
+  (password<->text, aria Tampilkan/Sembunyikan) dan style.css memuat
+  gaya .pw-toggle/.pw-wrap
 """
 import io, json, os, re, subprocess, sys, tempfile, time, urllib.request, urllib.parse
 import urllib.error, http.cookiejar, uuid, zipfile
@@ -548,6 +553,39 @@ def main():
         s, url, page = req(jemaat, "/admin/keluarga")
         must("/login" in url and "Daftar Keluarga" not in page,
              "sesi jemaat TIDAK bisa membuka /admin/keluarga")
+
+        # 13F. Tombol mata password: app.js memasangnya otomatis pada
+        # SETIAP input type="password" — semua halaman yang punya kolom
+        # password harus memuat app.js, dan logika saklarnya ada di
+        # app.js + gayanya di style.css.
+        s, url, login_mata = req(publik, "/login")
+        must('type="password"' in login_mata and "/static/app.js" in login_mata,
+             "mata password: halaman masuk admin punya kolom password + app.js")
+        s, url, home_mata = req(publik, "/")
+        must('type="password"' in home_mata and "/static/app.js" in home_mata,
+             "mata password: halaman publik (kartu Login Jemaat) punya kolom password + app.js")
+        s, url, form_mata = req(admin, f"/admin/keluarga/{fid}")
+        must('name="kata_sandi"' in form_mata and 'type="password"' in form_mata
+             and "/static/app.js" in form_mata,
+             "mata password: formulir keluarga (Password Login Jemaat) + app.js")
+        s, url, atur_mata = req(admin, "/admin/pengaturan")
+        must('action="/ganti-password"' in atur_mata
+             and 'type="password"' in atur_mata and "/static/app.js" in atur_mata,
+             "mata password: Pengaturan (Ganti Password Admin) + app.js")
+        s, url, jemaat_mata = req(jemaat, "/jemaat")
+        must('name="password_lama"' in jemaat_mata
+             and 'name="password_baru"' in jemaat_mata
+             and 'type="password"' in jemaat_mata
+             and "/static/app.js" in jemaat_mata,
+             "mata password: Beranda Jemaat (formulir ganti password) + app.js")
+        s, url, hdr_js, js_bytes = req_bytes(publik, "/static/app.js")
+        js = js_bytes.decode("utf-8", "replace")
+        must("pw-toggle" in js and "pw-wrap" in js
+             and "Tampilkan password" in js and "Sembunyikan password" in js
+             and "=== 'password'" in js and "'text'" in js,
+             "app.js: logika tombol mata (pw-toggle, saklar password<->text, label aria)")
+        must(".pw-toggle" in css and ".pw-wrap" in css,
+             "style.css: gaya .pw-toggle & .pw-wrap terdefinisi")
 
         # 14. Backup & Pulihkan: halaman khusus admin, unduh ZIP lengkap,
         # dan penolakan berkas yang salah (data tidak berubah).
