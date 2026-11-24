@@ -194,7 +194,12 @@ button.swatch { width: 76px; height: 48px; margin: 0; padding: 6px;
 button.swatch.terpilih { outline: 3px solid var(--warna-aksen); outline-offset: 2px; }
 
 /* ---------- Banner & wallpaper (diatur admin di Pengaturan) ---------- */
-.banner { display: block; width: 100%; max-height: 280px; object-fit: cover;
+/* Banner berisi logo + nama gereja (teks): tampilkan SELALU utuh
+   mengikuti rasio asli gambarnya. Aturan lama (max-height 280px +
+   object-fit: cover) memotong gambar mengikuti kotak pendek — logo
+   kepotong dan tulisan nama gereja hilang (laporan Bos 24 Nov 2026,
+   screenshot halaman publik). */
+.banner { display: block; width: 100%; height: auto; object-fit: contain;
   border-radius: var(--radius); margin-bottom: 14px; box-shadow: var(--bayangan); }
 .pratinjau-atur { display: block; width: 100%; max-width: 420px; max-height: 200px;
   object-fit: cover; border-radius: 10px; margin: 6px 0; }
